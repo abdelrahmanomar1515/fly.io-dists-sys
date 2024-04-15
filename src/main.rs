@@ -2,6 +2,7 @@ use anyhow::{anyhow, bail, Context};
 use core::panic;
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     env::args,
     io::{self, stdin, Stdin, Write},
 };
@@ -40,10 +41,23 @@ enum Payload {
     GenerateOk {
         id: String,
     },
+    Broadcast {
+        message: usize,
+    },
+    BroadcastOk,
+
+    Read,
+    ReadOk {
+        messages: Vec<usize>,
+    },
+    Topology {
+        topology: HashMap<String, Vec<String>>,
+    },
+    TopologyOk,
 }
 
 impl Message {
-    fn handle(self, node_id: &Option<String>) -> Self {
+    fn handle(self, node_state: &mut NodeState) -> Self {
         Message {
             src: self.dest,
             dest: self.src,
@@ -56,7 +70,8 @@ impl Message {
                     Payload::Init { .. } => Payload::InitOk,
                     Payload::InitOk => panic!("Received init_ok"),
                     Payload::Generate => {
-                        let node_id = node_id
+                        let node_id = node_state
+                            .id
                             .as_ref()
                             .expect("node_id should be set when calling generate");
                         let msg_id: usize = self
@@ -67,23 +82,35 @@ impl Message {
                             id: format!("{node_id} - {}", msg_id),
                         }
                     }
-                    Payload::GenerateOk { .. } => panic!("Received echo_ok"),
+                    Payload::GenerateOk { .. } => panic!("Received generate_ok"),
+                    Payload::Broadcast { message } => {
+                        node_state.messages.push(message);
+                        Payload::BroadcastOk
+                    }
+                    Payload::BroadcastOk => panic!("Received broadcast_ok"),
+                    Payload::Read => Payload::ReadOk {
+                        messages: node_state.messages.clone(),
+                    },
+                    Payload::ReadOk { .. } => panic!("Received read_ok"),
+                    Payload::Topology { topology } => Payload::TopologyOk,
+                    Payload::TopologyOk => panic!("Received toplogy_ok"),
                 },
             },
         }
     }
 }
 
-struct Node {
+struct NodeState {
     id: Option<String>,
+    messages: Vec<usize>,
 }
 
-impl Node {
+impl NodeState {
     fn handle(&mut self, msg: Message) -> Message {
         if let Payload::Init { node_id, .. } = &msg.body.payload {
             self.id = Some(node_id.clone())
         }
-        msg.handle(&self.id)
+        msg.handle(self)
     }
 }
 
@@ -93,7 +120,10 @@ fn main() -> anyhow::Result<()> {
 
     let inputs = serde_json::Deserializer::from_reader(stdin).into_iter::<Message>();
 
-    let mut node = Node { id: None };
+    let mut node = NodeState {
+        id: None,
+        messages: vec![],
+    };
 
     for input in inputs {
         let input = input.context("Maelstrom input from STDIN can't be deserialized")?;
