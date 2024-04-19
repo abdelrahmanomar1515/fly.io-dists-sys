@@ -1,45 +1,58 @@
 use anyhow::Context;
 use core::panic;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, io::Write, sync::mpsc, thread};
+use std::{
+    collections::{HashMap, HashSet},
+    io::Write,
+    sync::mpsc,
+    thread::{self, sleep},
+    time::Duration,
+};
 
 fn main() -> anyhow::Result<()> {
     let (stdout_send, stdout_recv) = mpsc::channel();
     let (msg_send, msg_recv) = mpsc::channel();
+    let (timer_send, timer_recv) = mpsc::channel::<()>();
 
     thread::spawn(move || -> anyhow::Result<()> {
         let mut stdout = std::io::stdout().lock();
-        eprintln!("can take lock");
         loop {
             if let Ok(msg) = stdout_recv.recv() {
-                eprintln!("message to print: {:?}", msg);
-                serde_json::to_writer(&mut stdout, &msg).context("Write to stdout")?;
+                eprintln!("output: {:?}", msg);
+                serde_json::to_writer(&mut stdout, &msg).context("Serialize to stdout")?;
                 writeln!(stdout).context("write to stdout")?
             }
         }
     });
 
-    let msg_send2 = msg_send.clone();
+    thread::spawn(move || -> anyhow::Result<()> {
+        loop {
+            sleep(Duration::from_millis(100));
+            timer_send.send(())?;
+        }
+    });
+
     thread::spawn(move || -> anyhow::Result<()> {
         let stdin = std::io::stdin().lock();
         let inputs = serde_json::Deserializer::from_reader(stdin).into_iter::<Message>();
         for input in inputs {
-            let input = input.context("Maelstrom input from STDIN can't be deserialized")?;
-            eprintln!("input: {:?}", input);
-            msg_send2.send(input)?;
+            let input = input.context("deserialize stdin")?;
+            eprintln!("inputs: {:?}", input);
+            msg_send.send(input)?;
         }
 
-        eprintln!("finished reading input ");
+        eprintln!("input stream finished");
         Ok(())
     });
 
     let mut node = NodeState {
         id: None,
-        messages: vec![],
+        messages: HashSet::new(),
         nearby_nodes: vec![],
-        msg_send: msg_send.clone(),
+        timer_recv,
         msg_recv,
         stdout_send,
+        known_messages: HashMap::new(),
     };
     node.handle().context("handling failed")?;
     eprintln!("somehow finished");
@@ -88,110 +101,137 @@ enum Payload {
 
     Read,
     ReadOk {
-        messages: Vec<usize>,
+        messages: HashSet<usize>,
     },
     Topology {
         topology: HashMap<String, Vec<String>>,
     },
     TopologyOk,
-}
-
-impl Message {
-    fn handle(self, node_state: &mut NodeState) -> Self {
-        Message {
-            src: self.dest,
-            dest: self.src,
-            body: Body {
-                msg_id: self.body.msg_id.map(|id| id + 1),
-                in_reply_to: self.body.msg_id,
-                payload: match self.body.payload {
-                    Payload::Echo { echo } => Payload::EchoOk { echo },
-                    Payload::EchoOk { .. } => panic!("Received echo_ok"),
-                    Payload::Init { .. } => Payload::InitOk,
-                    Payload::InitOk => panic!("Received init_ok"),
-                    Payload::Generate => {
-                        let node_id = node_state
-                            .id
-                            .as_ref()
-                            .expect("node_id should be set when calling generate");
-                        let msg_id: usize = self
-                            .body
-                            .msg_id
-                            .expect("msg_id should be available in generate message");
-                        Payload::GenerateOk {
-                            id: format!("{node_id} - {}", msg_id),
-                        }
-                    }
-                    Payload::GenerateOk { .. } => panic!("Received generate_ok"),
-                    Payload::Broadcast { message } => {
-                        node_state.messages.push(message);
-                        node_state.broadcast(message);
-                        Payload::BroadcastOk
-                    }
-                    Payload::BroadcastOk => panic!("Received broadcast_ok"),
-                    Payload::Read => Payload::ReadOk {
-                        messages: node_state.messages.clone(),
-                    },
-                    Payload::ReadOk { .. } => panic!("Received read_ok"),
-                    Payload::Topology { topology } => {
-                        if let Some(nodes) = topology.get(
-                            node_state
-                                .id
-                                .as_ref()
-                                .expect("node_id should be set when calling toplogy"),
-                        ) {
-                            node_state.nearby_nodes = nodes.clone();
-                        };
-                        Payload::TopologyOk
-                    }
-                    Payload::TopologyOk => panic!("Received toplogy_ok"),
-                },
-            },
-        }
-    }
+    Gossip {
+        messages: HashSet<usize>,
+    },
+    GossipOk {
+        messages: HashSet<usize>,
+    },
 }
 
 struct NodeState {
     id: Option<String>,
-    messages: Vec<usize>,
+    messages: HashSet<usize>,
+    known_messages: HashMap<String, HashSet<usize>>,
     nearby_nodes: Vec<String>,
     stdout_send: mpsc::Sender<Message>,
-    msg_send: mpsc::Sender<Message>,
     msg_recv: mpsc::Receiver<Message>,
+    timer_recv: mpsc::Receiver<()>,
 }
 
 impl NodeState {
     fn handle(&mut self) -> anyhow::Result<()> {
         loop {
-            let recv = &self.msg_recv;
-            let msg = recv.recv().expect("receving failed ");
-            eprintln!("message to handle: {:?}", msg);
+            if self.timer_recv.try_recv().is_ok() {
+                self.gossip().context("gossip failed")?;
+            }
+
+            let msg = self.msg_recv.try_recv();
+            if msg.is_err() {
+                continue;
+            }
+            let msg = msg.unwrap();
 
             if let Payload::Init { node_id, .. } = &msg.body.payload {
                 self.id = Some(node_id.clone())
             }
-            let reply = msg.handle(self);
-            eprintln!("handled message with reply : {:?}", reply);
+
+            let reply = Message {
+                src: msg.dest,
+                dest: msg.src.clone(),
+                body: Body {
+                    msg_id: msg.body.msg_id.map(|id| id + 1),
+                    in_reply_to: msg.body.msg_id,
+                    payload: match msg.body.payload {
+                        Payload::Echo { echo } => Payload::EchoOk { echo },
+                        Payload::EchoOk { .. } => panic!("Received echo_ok"),
+                        Payload::Init { .. } => Payload::InitOk,
+                        Payload::InitOk => panic!("Received init_ok"),
+                        Payload::Generate => {
+                            let node_id = self
+                                .id
+                                .as_ref()
+                                .expect("node_id should be set when calling generate");
+                            let msg_id: usize = msg
+                                .body
+                                .msg_id
+                                .expect("msg_id should be available in generate message");
+                            Payload::GenerateOk {
+                                id: format!("{node_id} - {}", msg_id),
+                            }
+                        }
+                        Payload::GenerateOk { .. } => panic!("Received generate_ok"),
+                        Payload::Broadcast { message } => {
+                            self.messages.insert(message);
+                            Payload::BroadcastOk
+                        }
+                        Payload::BroadcastOk => panic!("Received broadcast_ok"),
+                        Payload::Read => Payload::ReadOk {
+                            messages: self.messages.clone(),
+                        },
+                        Payload::ReadOk { .. } => panic!("Received read_ok"),
+                        Payload::Topology { topology } => {
+                            if let Some(nodes) = topology.get(
+                                self.id
+                                    .as_ref()
+                                    .expect("node_id should be set when calling toplogy"),
+                            ) {
+                                self.nearby_nodes = nodes.clone();
+                            };
+                            Payload::TopologyOk
+                        }
+                        Payload::TopologyOk => panic!("Received toplogy_ok"),
+                        Payload::Gossip { messages } => {
+                            self.messages.extend(messages.clone());
+                            Payload::GossipOk { messages }
+                        }
+                        Payload::GossipOk { messages } => {
+                            self.known_messages
+                                .entry(msg.src)
+                                .and_modify(|v| v.extend(messages.clone()))
+                                .or_insert(messages);
+                            continue;
+                        }
+                    },
+                },
+            };
             self.stdout_send
                 .send(reply)
                 .context("sending to stdout channel")?;
         }
     }
 
-    fn broadcast(&self, msg: usize) {
-        let msg_send = self.msg_send.clone();
-        thread::spawn(move || -> anyhow::Result<()> {
+    fn gossip(&self) -> anyhow::Result<()> {
+        for node_id in &self.nearby_nodes {
+            let empty_set = HashSet::new();
+            let messages_known_to_node = self.known_messages.get(node_id).unwrap_or(&empty_set);
+            let messages: HashSet<usize> = self
+                .messages
+                .difference(messages_known_to_node)
+                .copied()
+                .collect();
+
+            if messages.is_empty() {
+                continue;
+            }
+
             let msg = Message {
                 body: Body {
-                    msg_id: todo!(),
-                    in_reply_to: todo!(),
-                    payload: todo!(),
+                    in_reply_to: None,
+                    msg_id: None,
+                    payload: Payload::Gossip { messages },
                 },
-                src: todo!(),
-                dest: todo!(),
+                src: self.id.clone().expect("message id already set"),
+                dest: node_id.clone(),
             };
-            msg_send.send(msg).context("injecting message")?;
-            todo!("Implement broadcasting")
-        });
+            self.stdout_send.send(msg).context("injecting message")?
+        }
+        Ok(())
     }
 }
