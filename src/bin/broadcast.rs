@@ -1,63 +1,12 @@
 use anyhow::Context;
 use core::panic;
+use gossip::{main_loop, Handle};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::{HashMap, HashSet},
-    io::Write,
-    sync::mpsc,
-    thread::{self, sleep},
-    time::Duration,
-};
+use std::collections::{HashMap, HashSet};
+use std::sync::mpsc;
 
 fn main() -> anyhow::Result<()> {
-    let (stdout_send, stdout_recv) = mpsc::channel();
-    let (msg_send, msg_recv) = mpsc::channel();
-    let (timer_send, timer_recv) = mpsc::channel::<()>();
-
-    thread::spawn(move || -> anyhow::Result<()> {
-        let mut stdout = std::io::stdout().lock();
-        loop {
-            if let Ok(msg) = stdout_recv.recv() {
-                eprintln!("output: {:?}", msg);
-                serde_json::to_writer(&mut stdout, &msg).context("Serialize to stdout")?;
-                writeln!(stdout).context("write to stdout")?
-            }
-        }
-    });
-
-    thread::spawn(move || -> anyhow::Result<()> {
-        loop {
-            sleep(Duration::from_millis(100));
-            timer_send.send(())?;
-        }
-    });
-
-    thread::spawn(move || -> anyhow::Result<()> {
-        let stdin = std::io::stdin().lock();
-        let inputs = serde_json::Deserializer::from_reader(stdin).into_iter::<Message>();
-        for input in inputs {
-            let input = input.context("deserialize stdin")?;
-            eprintln!("inputs: {:?}", input);
-            msg_send.send(input)?;
-        }
-
-        eprintln!("input stream finished");
-        Ok(())
-    });
-
-    let mut node = NodeState {
-        id: None,
-        messages: HashSet::new(),
-        nearby_nodes: vec![],
-        timer_recv,
-        msg_recv,
-        stdout_send,
-        known_messages: HashMap::new(),
-    };
-    node.handle().context("handling failed")?;
-    eprintln!("somehow finished");
-
-    Ok(())
+    main_loop(NodeState::new)
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -84,16 +33,6 @@ enum Payload {
         node_ids: Vec<String>,
     },
     InitOk,
-    Echo {
-        echo: String,
-    },
-    EchoOk {
-        echo: String,
-    },
-    Generate,
-    GenerateOk {
-        id: String,
-    },
     Broadcast {
         message: usize,
     },
@@ -126,6 +65,23 @@ struct NodeState {
 }
 
 impl NodeState {
+    fn new(
+        timer_recv: mpsc::Receiver<()>,
+        msg_recv: mpsc::Receiver<Message>,
+        stdout_send: mpsc::Sender<Message>,
+    ) -> Self {
+        Self {
+            id: None,
+            messages: HashSet::new(),
+            nearby_nodes: vec![],
+            known_messages: HashMap::new(),
+            stdout_send,
+            msg_recv,
+            timer_recv,
+        }
+    }
+}
+impl Handle for NodeState {
     fn handle(&mut self) -> anyhow::Result<()> {
         loop {
             if self.timer_recv.try_recv().is_ok() {
@@ -149,24 +105,8 @@ impl NodeState {
                     msg_id: msg.body.msg_id.map(|id| id + 1),
                     in_reply_to: msg.body.msg_id,
                     payload: match msg.body.payload {
-                        Payload::Echo { echo } => Payload::EchoOk { echo },
-                        Payload::EchoOk { .. } => panic!("Received echo_ok"),
                         Payload::Init { .. } => Payload::InitOk,
                         Payload::InitOk => panic!("Received init_ok"),
-                        Payload::Generate => {
-                            let node_id = self
-                                .id
-                                .as_ref()
-                                .expect("node_id should be set when calling generate");
-                            let msg_id: usize = msg
-                                .body
-                                .msg_id
-                                .expect("msg_id should be available in generate message");
-                            Payload::GenerateOk {
-                                id: format!("{node_id} - {}", msg_id),
-                            }
-                        }
-                        Payload::GenerateOk { .. } => panic!("Received generate_ok"),
                         Payload::Broadcast { message } => {
                             self.messages.insert(message);
                             Payload::BroadcastOk
@@ -206,7 +146,9 @@ impl NodeState {
                 .context("sending to stdout channel")?;
         }
     }
+}
 
+impl NodeState {
     fn gossip(&self) -> anyhow::Result<()> {
         for node_id in &self.nearby_nodes {
             let empty_set = HashSet::new();
