@@ -18,7 +18,7 @@ fn main() -> anyhow::Result<()> {
 
     thread::spawn(move || loop {
         let rng = rand::rng().random_range(0..100);
-        thread::sleep(Duration::from_millis(400 + rng));
+        thread::sleep(Duration::from_millis(1000 + rng));
         node_state.lock().unwrap().gossip(&runtime2)
     });
 
