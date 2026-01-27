@@ -1,5 +1,6 @@
 use core::panic;
 use gossip::{Message, Runtime};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -16,7 +17,8 @@ fn main() -> anyhow::Result<()> {
     let node_state2 = Arc::clone(&node_state);
 
     thread::spawn(move || loop {
-        thread::sleep(Duration::from_millis(75));
+        let rng = rand::rng().random_range(0..100);
+        thread::sleep(Duration::from_millis(400 + rng));
         node_state.lock().unwrap().gossip(&runtime2)
     });
 
@@ -24,8 +26,8 @@ fn main() -> anyhow::Result<()> {
         let Ok(msg) = msg else { panic!("got error") };
 
         let reply_payload = {
-            let mut state1 = node_state2.lock().unwrap();
-            state1.payload_reply(&msg, &runtime)
+            let mut state = node_state2.lock().unwrap();
+            state.payload_reply(&msg, &runtime)
         };
         if let Some(reply_payload) = reply_payload {
             let reply = msg.reply(reply_payload);
@@ -35,19 +37,17 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[derive(Default)]
 struct NodeState {
     messages: HashSet<usize>,
     known_messages: HashMap<String, HashSet<usize>>,
     nearby_nodes: Vec<String>,
+    all_nodes: Vec<String>,
 }
 
 impl NodeState {
     fn new() -> Self {
-        Self {
-            messages: Default::default(),
-            known_messages: Default::default(),
-            nearby_nodes: Default::default(),
-        }
+        Default::default()
     }
 
     fn payload_reply(&mut self, msg: &Message<Payload>, runtime: &Runtime) -> Option<Payload> {
@@ -60,6 +60,7 @@ impl NodeState {
                 messages: self.messages.clone(),
             }),
             Payload::Topology { topology } => {
+                self.all_nodes = topology.clone().into_keys().collect();
                 if let Some(nodes) = topology.get(&runtime.node_id) {
                     self.nearby_nodes = nodes.clone();
                 };
@@ -85,7 +86,11 @@ impl NodeState {
     }
 
     fn gossip(&self, runtime: &Runtime) {
-        for dest_id in &self.nearby_nodes {
+        for dest_id in self
+            .all_nodes
+            .iter()
+            .filter(|node| runtime.node_id != **node)
+        {
             let empty_set = HashSet::new();
             let messages_known_to_node = self.known_messages.get(dest_id).unwrap_or(&empty_set);
             let messages: HashSet<usize> = self

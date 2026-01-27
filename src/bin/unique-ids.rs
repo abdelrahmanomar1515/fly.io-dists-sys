@@ -15,7 +15,7 @@ fn main() -> anyhow::Result<()> {
                     .msg_id
                     .expect("msg_id should be available in generate message");
                 Payload::GenerateOk {
-                    id: format!("{node_id} - {}", msg_id),
+                    id: format!("{node_id} - {msg_id}"),
                 }
             }
             Payload::GenerateOk { .. } => continue,
