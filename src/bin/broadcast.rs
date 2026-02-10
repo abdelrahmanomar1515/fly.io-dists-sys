@@ -1,10 +1,10 @@
 use core::panic;
-use gossip::{Message, Node, Runtime};
+use gossip::{Message, Network, Node, Runtime};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
-    sync::{mpsc::Sender, Arc, Mutex},
+    sync::{Arc, Mutex},
     thread,
     time::Duration,
 };
@@ -16,16 +16,11 @@ fn main() -> anyhow::Result<()> {
 struct BoradcastNode {
     messages: Arc<Mutex<HashSet<usize>>>,
     known_messages: Arc<Mutex<HashMap<String, HashSet<usize>>>>,
-    outbound: Sender<Message<Payload>>,
+    network: Network<Payload>,
 }
 
 impl Node<Payload> for BoradcastNode {
-    fn from_init(
-        id: String,
-        neighbors: Vec<String>,
-        send_tx: std::sync::mpsc::Sender<Message<Payload>>,
-    ) -> Self {
-        let outbound = send_tx.clone();
+    fn from_init(id: String, neighbors: Vec<String>, network: Network<Payload>) -> Self {
         let messages: Arc<Mutex<HashSet<usize>>> = Default::default();
         let known_messages: Arc<Mutex<HashMap<String, HashSet<usize>>>> = Default::default();
 
@@ -34,13 +29,13 @@ impl Node<Payload> for BoradcastNode {
             neighbors,
             messages.clone(),
             known_messages.clone(),
-            outbound,
+            network.clone(),
         );
 
         Self {
             messages,
             known_messages,
-            outbound: send_tx,
+            network,
         }
     }
 
@@ -65,7 +60,7 @@ impl BoradcastNode {
         all_nodes: Vec<String>,
         messages: Arc<Mutex<HashSet<usize>>>,
         known_messages: Arc<Mutex<HashMap<String, HashSet<usize>>>>,
-        outbound: Sender<Message<Payload>>,
+        network: Network<Payload>,
     ) {
         thread::spawn(move || loop {
             let rng = rand::rng().random_range(0..100);
@@ -93,7 +88,7 @@ impl BoradcastNode {
                     dest_id.clone(),
                     Payload::Gossip { messages },
                 );
-                outbound.send(msg).expect("failed to send gossip message");
+                network.send(msg);
             }
         });
     }
@@ -108,7 +103,7 @@ impl BoradcastNode {
             messages.insert(message);
         }
         let reply = msg.reply(Payload::BroadcastOk);
-        self.outbound.send(reply)?;
+        self.network.send(reply);
         Ok(())
     }
 
@@ -120,7 +115,7 @@ impl BoradcastNode {
         let reply = msg.reply(Payload::ReadOk {
             messages: self.messages.lock().expect("Unable to get lock").clone(),
         });
-        self.outbound.send(reply)?;
+        self.network.send(reply);
         Ok(())
     }
 
@@ -140,7 +135,7 @@ impl BoradcastNode {
         let reply = msg.reply(Payload::GossipOk {
             messages: incoming_messages.clone(),
         });
-        self.outbound.send(reply)?;
+        self.network.send(reply);
         Ok(())
     }
 
@@ -150,7 +145,7 @@ impl BoradcastNode {
         };
 
         let reply = msg.reply(Payload::TopologyOk);
-        self.outbound.send(reply)?;
+        self.network.send(reply);
         Ok(())
     }
 

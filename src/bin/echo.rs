@@ -1,28 +1,23 @@
-use gossip::{Message, Node, Runtime};
+use gossip::{Message, Network, Node, Runtime};
 use serde::{Deserialize, Serialize};
-use std::sync::mpsc::Sender;
 
 fn main() -> anyhow::Result<()> {
     Runtime::<Payload, EchoNode>::run()
 }
 
 struct EchoNode {
-    outbound: Sender<Message<Payload>>,
+    network: Network<Payload>,
 }
 
 impl Node<Payload> for EchoNode {
-    fn from_init(
-        _id: String,
-        _neighbors: Vec<String>,
-        send_tx: Sender<gossip::Message<Payload>>,
-    ) -> Self {
-        Self { outbound: send_tx }
+    fn from_init(_id: String, _neighbors: Vec<String>, network: Network<Payload>) -> Self {
+        Self { network }
     }
 
     fn handle_message(&mut self, message: Message<Payload>) -> anyhow::Result<()> {
         if let Payload::Echo { echo } = message.get_payload() {
-            self.outbound
-                .send(message.reply(Payload::EchoOk { echo: echo.clone() }))?
+            self.network
+                .send(message.reply(Payload::EchoOk { echo: echo.clone() }))
         }
 
         Ok(())

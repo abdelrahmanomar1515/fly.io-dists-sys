@@ -1,6 +1,5 @@
-use gossip::{Message, Node, Runtime};
+use gossip::{Network, Node, Runtime};
 use serde::{Deserialize, Serialize};
-use std::sync::mpsc::Sender;
 
 fn main() -> anyhow::Result<()> {
     Runtime::<Payload, UniqueIdsNode>::run()
@@ -8,17 +7,13 @@ fn main() -> anyhow::Result<()> {
 
 struct UniqueIdsNode {
     node_id: String,
-    outbound: Sender<Message<Payload>>,
+    network: Network<Payload>,
 }
 impl Node<Payload> for UniqueIdsNode {
-    fn from_init(
-        id: String,
-        _neighbors: Vec<String>,
-        send_tx: std::sync::mpsc::Sender<gossip::Message<Payload>>,
-    ) -> Self {
+    fn from_init(id: String, _neighbors: Vec<String>, network: Network<Payload>) -> Self {
         Self {
             node_id: id,
-            outbound: send_tx,
+            network,
         }
     }
 
@@ -30,9 +25,9 @@ impl Node<Payload> for UniqueIdsNode {
                     .msg_id
                     .expect("msg_id should be available in generate message");
                 let node_id = &self.node_id;
-                self.outbound.send(message.reply(Payload::GenerateOk {
+                self.network.send(message.reply(Payload::GenerateOk {
                     id: format!("{node_id}-{msg_id}"),
-                }))?
+                }))
             }
             Payload::GenerateOk { .. } => {}
         }

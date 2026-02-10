@@ -39,6 +39,10 @@ impl<T> Message<T> {
     pub fn get_payload(&self) -> &T {
         &self.body.payload
     }
+
+    pub fn is_reply(&self) -> bool {
+        self.body.in_reply_to.is_some()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
