@@ -1,6 +1,15 @@
 use anyhow::Context;
-use serde::{Deserialize, Serialize};
-use std::{fmt::Debug, io::Write};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::{
+    fmt::Debug,
+    io::{stdout, Write},
+    marker::PhantomData,
+    sync::mpsc::{self, Sender},
+    thread,
+};
+
+pub trait Payload: Clone + Debug + Serialize + DeserializeOwned + Send + 'static {}
+impl<P: Clone + Debug + Serialize + DeserializeOwned + Send + 'static> Payload for P {}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Message<Payload> {
@@ -47,12 +56,13 @@ pub struct Body<Payload> {
     pub payload: Payload,
 }
 
-pub struct Runtime {
-    pub node_id: String,
-}
+pub struct Runtime<TPayload: Payload, TNode: Node<TPayload>>(
+    PhantomData<TPayload>,
+    PhantomData<TNode>,
+);
 
-impl Runtime {
-    pub fn new() -> Self {
+impl<TPayload: Payload, TNode: Node<TPayload>> Runtime<TPayload, TNode> {
+    pub fn run() -> anyhow::Result<()> {
         let stdin = std::io::stdin().lock();
         let init_msg = serde_json::Deserializer::from_reader(stdin)
             .into_iter::<Message<InitializationPayload>>()
@@ -63,7 +73,11 @@ impl Runtime {
         let Message {
             body:
                 Body {
-                    payload: InitializationPayload::Init { ref node_id, .. },
+                    payload:
+                        InitializationPayload::Init {
+                            ref node_id,
+                            ref node_ids,
+                        },
                     ..
                 },
             ..
@@ -72,33 +86,44 @@ impl Runtime {
             panic!("first message not init")
         };
 
-        let node = Self {
-            node_id: node_id.clone(),
-        };
+        let (stdin_tx, stdin_rx) = mpsc::channel();
+        let (stdout_tx, stdout_rx) = mpsc::channel();
+
+        thread::spawn(move || {
+            let stdin = std::io::stdin().lock();
+            let msgs =
+                serde_json::Deserializer::from_reader(stdin).into_iter::<Message<TPayload>>();
+            for msg in msgs.map(|r| r.expect("Malformed message")) {
+                stdin_tx.send(msg).expect("Unable to send out message");
+            }
+        });
+
+        let node = TNode::from_init(node_id.clone(), node_ids.clone(), stdout_tx);
+
+        let _jh = thread::spawn(|| {
+            for msg in stdout_rx {
+                let mut stdout = stdout().lock();
+                let msg_json = serde_json::to_string(&msg).expect("Serialize out message");
+                if let Err(error) = writeln!(stdout, "{msg_json}") {
+                    eprintln!("Unable to send msg to stdout: {error}")
+                }
+            }
+        });
+
         let reply = init_msg.reply(InitializationPayload::InitOk);
-        node.send(&reply).expect("reply init ok failed");
+        {
+            let mut stdout = stdout().lock();
+            let reply = serde_json::to_string(&reply).context("Serialize init_ok")?;
+            if let Err(error) = writeln!(stdout, "{reply}") {
+                eprintln!("Unable to send init_ok msg to stdout: {error}")
+            }
+        }
 
-        node
-    }
+        for msg in stdin_rx {
+            node.handle_message(msg).context("Handling message")?;
+        }
 
-    pub fn messages<'de, Payload: Deserialize<'de> + 'de>(
-        &self,
-    ) -> impl Iterator<Item = Result<Message<Payload>, serde_json::Error>> + 'de {
-        let stdin = std::io::stdin().lock();
-        serde_json::Deserializer::from_reader(stdin).into_iter::<Message<Payload>>()
-    }
-
-    pub fn send<Payload: Serialize>(&self, msg: &Message<Payload>) -> anyhow::Result<()> {
-        let mut stdout = std::io::stdout().lock();
-        serde_json::to_writer(&mut stdout, &msg).context("Serialize to stdout")?;
-        writeln!(stdout).context("write to stdout")?;
         Ok(())
-    }
-}
-
-impl Default for Runtime {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -111,4 +136,9 @@ enum InitializationPayload {
         node_ids: Vec<String>,
     },
     InitOk,
+}
+
+pub trait Node<Payload> {
+    fn from_init(id: String, neighbors: Vec<String>, send_tx: Sender<Message<Payload>>) -> Self;
+    fn handle_message(&self, message: Message<Payload>) -> anyhow::Result<()>;
 }

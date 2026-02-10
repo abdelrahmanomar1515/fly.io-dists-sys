@@ -1,20 +1,32 @@
-use core::panic;
-use gossip::Runtime;
+use gossip::{Message, Node, Runtime};
 use serde::{Deserialize, Serialize};
+use std::sync::mpsc::Sender;
 
 fn main() -> anyhow::Result<()> {
-    let runtime = Runtime::new();
-    for msg in runtime.messages::<Payload>() {
-        let Ok(msg) = msg else { panic!("got error") };
+    Runtime::<Payload, EchoNode>::run()
+}
 
-        let reply_payload = match msg.get_payload() {
-            Payload::Echo { echo } => Payload::EchoOk { echo: echo.clone() },
-            Payload::EchoOk { .. } => continue,
-        };
-        let reply = msg.reply(reply_payload);
-        runtime.send(&reply)?
+struct EchoNode {
+    outbound: Sender<Message<Payload>>,
+}
+
+impl Node<Payload> for EchoNode {
+    fn from_init(
+        _id: String,
+        _neighbors: Vec<String>,
+        send_tx: Sender<gossip::Message<Payload>>,
+    ) -> Self {
+        Self { outbound: send_tx }
     }
-    Ok(())
+
+    fn handle_message(&self, message: Message<Payload>) -> anyhow::Result<()> {
+        if let Payload::Echo { echo } = message.get_payload() {
+            self.outbound
+                .send(message.reply(Payload::EchoOk { echo: echo.clone() }))?
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

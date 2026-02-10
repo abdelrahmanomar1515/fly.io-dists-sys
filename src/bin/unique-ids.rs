@@ -1,29 +1,43 @@
-use core::panic;
-use gossip::Runtime;
+use gossip::{Message, Node, Runtime};
 use serde::{Deserialize, Serialize};
+use std::sync::mpsc::Sender;
 
 fn main() -> anyhow::Result<()> {
-    let runtime = Runtime::new();
-    for msg in runtime.messages::<Payload>() {
-        let Ok(msg) = msg else { panic!("got error") };
+    Runtime::<Payload, UniqueIdsNode>::run()
+}
 
-        let reply_payload = match msg.get_payload() {
+struct UniqueIdsNode {
+    node_id: String,
+    outbound: Sender<Message<Payload>>,
+}
+impl Node<Payload> for UniqueIdsNode {
+    fn from_init(
+        id: String,
+        _neighbors: Vec<String>,
+        send_tx: std::sync::mpsc::Sender<gossip::Message<Payload>>,
+    ) -> Self {
+        Self {
+            node_id: id,
+            outbound: send_tx,
+        }
+    }
+
+    fn handle_message(&self, message: gossip::Message<Payload>) -> anyhow::Result<()> {
+        match message.get_payload() {
             Payload::Generate => {
-                let node_id = runtime.node_id.clone();
-                let msg_id: usize = msg
+                let msg_id: usize = message
                     .body
                     .msg_id
                     .expect("msg_id should be available in generate message");
-                Payload::GenerateOk {
-                    id: format!("{node_id} - {msg_id}"),
-                }
+                let node_id = &self.node_id;
+                self.outbound.send(message.reply(Payload::GenerateOk {
+                    id: format!("{node_id}-{msg_id}"),
+                }))?
             }
-            Payload::GenerateOk { .. } => continue,
-        };
-        let reply = msg.reply(reply_payload);
-        runtime.send(&reply)?
+            Payload::GenerateOk { .. } => {}
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
