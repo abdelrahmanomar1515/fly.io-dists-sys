@@ -98,7 +98,7 @@ impl<TPayload: Payload, TNode: Node<TPayload>> Runtime<TPayload, TNode> {
             }
         });
 
-        let node = TNode::from_init(node_id.clone(), node_ids.clone(), stdout_tx);
+        let mut node = TNode::from_init(node_id.clone(), node_ids.clone(), stdout_tx);
 
         let _jh = thread::spawn(|| {
             for msg in stdout_rx {
@@ -140,5 +140,5 @@ enum InitializationPayload {
 
 pub trait Node<Payload> {
     fn from_init(id: String, neighbors: Vec<String>, send_tx: Sender<Message<Payload>>) -> Self;
-    fn handle_message(&self, message: Message<Payload>) -> anyhow::Result<()>;
+    fn handle_message(&mut self, message: Message<Payload>) -> anyhow::Result<()>;
 }

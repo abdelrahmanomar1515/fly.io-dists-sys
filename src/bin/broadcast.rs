@@ -1,115 +1,169 @@
 use core::panic;
-use gossip::{Message, Runtime};
+use gossip::{Message, Node, Runtime};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex},
+    sync::{mpsc::Sender, Arc, Mutex},
     thread,
     time::Duration,
 };
 
 fn main() -> anyhow::Result<()> {
-    let runtime = Arc::new(Runtime::new());
-    let runtime2 = Arc::clone(&runtime);
-    let node_state = NodeState::new();
-    let node_state = Arc::new(Mutex::from(node_state));
-    let node_state2 = Arc::clone(&node_state);
+    Runtime::<Payload, BoradcastNode>::run()
+}
 
-    thread::spawn(move || loop {
-        let rng = rand::rng().random_range(0..100);
-        thread::sleep(Duration::from_millis(1000 + rng));
-        node_state.lock().unwrap().gossip(&runtime2)
-    });
+struct BoradcastNode {
+    messages: Arc<Mutex<HashSet<usize>>>,
+    known_messages: Arc<Mutex<HashMap<String, HashSet<usize>>>>,
+    outbound: Sender<Message<Payload>>,
+}
 
-    for msg in runtime.messages::<Payload>() {
-        let Ok(msg) = msg else { panic!("got error") };
+impl Node<Payload> for BoradcastNode {
+    fn from_init(
+        id: String,
+        neighbors: Vec<String>,
+        send_tx: std::sync::mpsc::Sender<Message<Payload>>,
+    ) -> Self {
+        let outbound = send_tx.clone();
+        let messages: Arc<Mutex<HashSet<usize>>> = Default::default();
+        let known_messages: Arc<Mutex<HashMap<String, HashSet<usize>>>> = Default::default();
 
-        let reply_payload = {
-            let mut state = node_state2.lock().unwrap();
-            state.payload_reply(&msg, &runtime)
-        };
-        if let Some(reply_payload) = reply_payload {
-            let reply = msg.reply(reply_payload);
-            runtime.send(&reply)?
+        BoradcastNode::gossip(
+            id,
+            neighbors,
+            messages.clone(),
+            known_messages.clone(),
+            outbound,
+        );
+
+        Self {
+            messages,
+            known_messages,
+            outbound: send_tx,
         }
     }
-    Ok(())
-}
 
-#[derive(Default)]
-struct NodeState {
-    messages: HashSet<usize>,
-    known_messages: HashMap<String, HashSet<usize>>,
-    nearby_nodes: Vec<String>,
-    all_nodes: Vec<String>,
-}
-
-impl NodeState {
-    fn new() -> Self {
-        Default::default()
-    }
-
-    fn payload_reply(&mut self, msg: &Message<Payload>, runtime: &Runtime) -> Option<Payload> {
+    fn handle_message(&mut self, msg: Message<Payload>) -> anyhow::Result<()> {
         match msg.get_payload() {
-            Payload::Broadcast { message } => {
-                self.messages.insert(*message);
-                Some(Payload::BroadcastOk)
-            }
-            Payload::Read => Some(Payload::ReadOk {
-                messages: self.messages.clone(),
-            }),
-            Payload::Topology { topology } => {
-                self.all_nodes = topology.clone().into_keys().collect();
-                if let Some(nodes) = topology.get(&runtime.node_id) {
-                    self.nearby_nodes = nodes.clone();
-                };
-                Some(Payload::TopologyOk)
-            }
-            Payload::Gossip { messages } => {
-                self.messages.extend(messages.clone());
-                Some(Payload::GossipOk {
-                    messages: messages.clone(),
-                })
-            }
-            Payload::GossipOk { messages } => {
-                self.known_messages
-                    .entry(msg.src.clone())
-                    .and_modify(|v| v.extend(messages.clone()))
-                    .or_insert(messages.clone());
-                None
-            }
+            Payload::Broadcast { .. } => self.handle_broadcast(msg)?,
+            Payload::Read => self.handle_read(msg)?,
+            Payload::Gossip { .. } => self.handle_gossip(msg)?,
+            Payload::GossipOk { .. } => self.handle_gossip_ok(msg)?,
+            Payload::Topology { .. } => self.handle_topology(msg)?,
             Payload::ReadOk { .. } | Payload::BroadcastOk | Payload::TopologyOk => {
                 panic!("got invalid message")
             }
         }
+        Ok(())
+    }
+}
+
+impl BoradcastNode {
+    fn gossip(
+        node_id: String,
+        all_nodes: Vec<String>,
+        messages: Arc<Mutex<HashSet<usize>>>,
+        known_messages: Arc<Mutex<HashMap<String, HashSet<usize>>>>,
+        outbound: Sender<Message<Payload>>,
+    ) {
+        thread::spawn(move || loop {
+            let rng = rand::rng().random_range(0..100);
+            thread::sleep(Duration::from_millis(1000 + rng));
+            for dest_id in all_nodes.iter().filter(|node| node_id != **node) {
+                let empty_set = HashSet::new();
+
+                let messages_known_to_node =
+                    known_messages.lock().expect("Can't lock known messages");
+                let messages_known_to_node =
+                    messages_known_to_node.get(dest_id).unwrap_or(&empty_set);
+                let messages: HashSet<usize> = messages
+                    .lock()
+                    .expect("Can't lock messages")
+                    .difference(messages_known_to_node)
+                    .copied()
+                    .collect();
+
+                if messages.is_empty() {
+                    continue;
+                }
+
+                let msg = Message::new(
+                    node_id.clone(),
+                    dest_id.clone(),
+                    Payload::Gossip { messages },
+                );
+                outbound.send(msg).expect("failed to send gossip message");
+            }
+        });
     }
 
-    fn gossip(&self, runtime: &Runtime) {
-        for dest_id in self
-            .all_nodes
-            .iter()
-            .filter(|node| runtime.node_id != **node)
+    fn handle_broadcast(&mut self, msg: Message<Payload>) -> anyhow::Result<()> {
+        let Payload::Broadcast { message } = msg.body.payload else {
+            panic!("expected broadcast");
+        };
+
         {
-            let empty_set = HashSet::new();
-            let messages_known_to_node = self.known_messages.get(dest_id).unwrap_or(&empty_set);
-            let messages: HashSet<usize> = self
-                .messages
-                .difference(messages_known_to_node)
-                .copied()
-                .collect();
-
-            if messages.is_empty() {
-                continue;
-            }
-
-            let msg = Message::new(
-                runtime.node_id.clone(),
-                dest_id.clone(),
-                Payload::Gossip { messages },
-            );
-            runtime.send(&msg).expect("failed to send gossip message");
+            let mut messages = self.messages.lock().expect("Unable to get lock");
+            messages.insert(message);
         }
+        let reply = msg.reply(Payload::BroadcastOk);
+        self.outbound.send(reply)?;
+        Ok(())
+    }
+
+    fn handle_read(&mut self, msg: Message<Payload>) -> anyhow::Result<()> {
+        let Payload::Read = msg.body.payload else {
+            panic!("expected read");
+        };
+
+        let reply = msg.reply(Payload::ReadOk {
+            messages: self.messages.lock().expect("Unable to get lock").clone(),
+        });
+        self.outbound.send(reply)?;
+        Ok(())
+    }
+
+    fn handle_gossip(&mut self, msg: Message<Payload>) -> anyhow::Result<()> {
+        let Payload::Gossip {
+            messages: incoming_messages,
+        } = &msg.body.payload
+        else {
+            panic!("expected gossip");
+        };
+
+        {
+            let mut messages = self.messages.lock().expect("Unable to get lock");
+            messages.extend(incoming_messages);
+        }
+
+        let reply = msg.reply(Payload::GossipOk {
+            messages: incoming_messages.clone(),
+        });
+        self.outbound.send(reply)?;
+        Ok(())
+    }
+
+    fn handle_topology(&mut self, msg: Message<Payload>) -> anyhow::Result<()> {
+        let Payload::Topology { .. } = &msg.body.payload else {
+            panic!("expected topology");
+        };
+
+        let reply = msg.reply(Payload::TopologyOk);
+        self.outbound.send(reply)?;
+        Ok(())
+    }
+
+    fn handle_gossip_ok(&mut self, msg: Message<Payload>) -> anyhow::Result<()> {
+        let Payload::GossipOk { messages } = msg.body.payload else {
+            panic!("expected gossip_ok");
+        };
+        let mut known_message = self.known_messages.lock().expect("Unable to get lock");
+        known_message
+            .entry(msg.src.clone())
+            .and_modify(|v| v.extend(messages.clone()))
+            .or_insert(messages.clone());
+        Ok(())
     }
 }
 
