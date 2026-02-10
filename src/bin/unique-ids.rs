@@ -22,7 +22,7 @@ impl Node<Payload> for UniqueIdsNode {
         }
     }
 
-    fn handle_message(&self, message: gossip::Message<Payload>) -> anyhow::Result<()> {
+    fn handle_message(&mut self, message: gossip::Message<Payload>) -> anyhow::Result<()> {
         match message.get_payload() {
             Payload::Generate => {
                 let msg_id: usize = message

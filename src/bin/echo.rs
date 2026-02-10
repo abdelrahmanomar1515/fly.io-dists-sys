@@ -19,7 +19,7 @@ impl Node<Payload> for EchoNode {
         Self { outbound: send_tx }
     }
 
-    fn handle_message(&self, message: Message<Payload>) -> anyhow::Result<()> {
+    fn handle_message(&mut self, message: Message<Payload>) -> anyhow::Result<()> {
         if let Payload::Echo { echo } = message.get_payload() {
             self.outbound
                 .send(message.reply(Payload::EchoOk { echo: echo.clone() }))?
