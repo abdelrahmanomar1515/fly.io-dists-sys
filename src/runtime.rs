@@ -79,15 +79,16 @@ where
                 serde_json::Deserializer::from_reader(stdin).into_iter::<Message<TPayload>>();
             for msg in msgs {
                 let msg = msg.expect("Malformed message");
-                if let Some(msg_id) = msg.body.msg_id {
-                    if let Some(reply_channel) = network.get_reply_channel(msg_id) {
-                        reply_channel
-                            .send(msg)
-                            .expect("Unable to send to rpc handler");
-                        continue;
+                if let Some(msg_id) = msg.body.in_reply_to {
+                    if let Some(reply_channel) = network.get_reply_channel(&msg_id) {
+                        eprintln!("reply channel {msg_id}");
+                        if let Err(e) = reply_channel.send(msg) {
+                            eprintln!("Unable to send to rpc handler: {e}");
+                        }
                     }
+                } else {
+                    stdin_tx.send(msg).expect("Unable to send out message");
                 }
-                stdin_tx.send(msg).expect("Unable to send out message");
             }
         });
 

@@ -24,6 +24,11 @@ impl<T> Message<T> {
         }
     }
 
+    pub fn with_id(mut self, msg_id: usize) -> Message<T> {
+        self.body.msg_id = Some(msg_id);
+        self
+    }
+
     pub fn reply<Payload>(&self, payload: Payload) -> Message<Payload> {
         Message {
             src: self.dest.clone(),
@@ -48,7 +53,7 @@ impl<T> Message<T> {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Body<Payload> {
     pub msg_id: Option<usize>,
-    in_reply_to: Option<usize>,
+    pub in_reply_to: Option<usize>,
     #[serde(flatten)]
     pub payload: Payload,
 }
