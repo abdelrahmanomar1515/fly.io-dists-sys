@@ -6,13 +6,13 @@ use crate::{
 };
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::{
     fmt::Debug,
-    io::{stdout, Write},
     marker::PhantomData,
     sync::mpsc::{self},
-    thread,
 };
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 pub struct Runtime<TPayload, TNode>(PhantomData<TPayload>, PhantomData<TNode>)
 where
@@ -22,16 +22,14 @@ where
 impl<TPayload, TNode> Runtime<TPayload, TNode>
 where
     TPayload: Payload,
-    TNode: Node<TPayload>,
+    TNode: Node<TPayload> + 'static,
 {
-    pub fn run() -> anyhow::Result<()> {
-        let stdin = std::io::stdin().lock();
-        let init_msg = serde_json::Deserializer::from_reader(stdin)
-            .into_iter::<Message<InitializationPayload>>()
-            .next()
-            .expect("first init")
-            .context("deserialize init")
-            .unwrap();
+    pub async fn run() -> anyhow::Result<()> {
+        let stdin = tokio::io::stdin();
+        let mut stdin_lines = BufReader::new(stdin).lines();
+
+        let init_msg = &stdin_lines.next_line().await?.expect("First message");
+        let init_msg = serde_json::from_str(init_msg).expect("Must be init");
         let Message {
             body:
                 Body {
@@ -52,34 +50,45 @@ where
         let (stdout_tx, stdout_rx) = mpsc::channel();
 
         let network = Network::new(stdout_tx);
-        let mut node = TNode::from_init(node_id.clone(), node_ids.clone(), network.clone());
+        let node = TNode::from_init(node_id.clone(), node_ids.clone(), network.clone());
 
         let reply = init_msg.reply(InitializationPayload::InitOk);
         {
-            let mut stdout = stdout().lock();
+            let mut stdout = tokio::io::stdout();
             let reply = serde_json::to_string(&reply).context("Serialize init_ok")?;
-            if let Err(error) = writeln!(stdout, "{reply}") {
-                eprintln!("Unable to send init_ok msg to stdout: {error}")
-            }
+            eprintln!("Trying to send reply: {reply}");
+            stdout
+                .write_all(reply.as_bytes())
+                .await
+                .expect("Writing to stdout");
+            stdout.write_all(b"\n").await.expect("Writing to stdout");
+            eprintln!("wrote reply");
+            stdout
+                .flush()
+                .await
+                .expect("Unable to send init_ok msg to stdout: {error}");
+            eprintln!("flushed write");
         }
 
-        thread::spawn(|| {
+        tokio::spawn(async {
             for msg in stdout_rx {
                 eprintln!("Sending message: {msg:?}");
-                let mut stdout = stdout().lock();
+                let mut stdout = tokio::io::stdout();
                 let msg_json = serde_json::to_string(&msg).expect("Serialize out message");
-                if let Err(error) = writeln!(stdout, "{msg_json}") {
-                    eprintln!("Unable to send msg to stdout: {error}")
-                }
+                stdout.write_all(msg_json.as_bytes()).await?;
+                stdout.write_all(b"\n").await?;
+                stdout.flush().await?;
             }
+            tokio::io::Result::Ok(())
         });
 
-        thread::spawn(move || {
-            let stdin = std::io::stdin().lock();
-            let msgs =
-                serde_json::Deserializer::from_reader(stdin).into_iter::<Message<TPayload>>();
-            for msg in msgs {
-                let msg = msg.expect("Malformed message");
+        tokio::spawn(async move {
+            let stdin = tokio::io::stdin();
+            let mut lines = tokio::io::BufReader::new(stdin).lines();
+
+            while let Some(line) = lines.next_line().await.expect("Malformed new line message") {
+                let msg = serde_json::from_str(&line);
+                let msg: Message<TPayload> = msg.expect("Malformed message");
                 eprintln!("Got message: {msg:?}");
                 if let Some(reply_channel) = msg
                     .body
@@ -96,8 +105,18 @@ where
             }
         });
 
-        for msg in stdin_rx {
-            node.handle_message(msg).context("Handling message")?;
+        let node = Arc::new(node);
+        for msg in stdin_rx.into_iter() {
+            let node = node.clone();
+            // eprintln!("strong count: {}", Arc::strong_count(&node));
+            // eprintln!("weak count: {}", Arc::strong_count(&node));
+            eprintln!("Handling message: {msg:?}");
+            tokio::spawn(async move {
+                let _ = node
+                    .handle_message(msg)
+                    .await
+                    .inspect_err(|e| eprintln!("Got error when handling message: {e}"));
+            });
         }
 
         Ok(())
