@@ -1,14 +1,17 @@
+use async_trait::async_trait;
 use gossip::{Network, Node, Runtime};
 use serde::{Deserialize, Serialize};
 
-fn main() -> anyhow::Result<()> {
-    Runtime::<Payload, UniqueIdsNode>::run()
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    Runtime::<Payload, UniqueIdsNode>::run().await
 }
 
 struct UniqueIdsNode {
     node_id: String,
     network: Network<Payload>,
 }
+#[async_trait]
 impl Node<Payload> for UniqueIdsNode {
     fn from_init(id: String, _neighbors: Vec<String>, network: Network<Payload>) -> Self {
         Self {
@@ -17,7 +20,7 @@ impl Node<Payload> for UniqueIdsNode {
         }
     }
 
-    fn handle_message(&mut self, message: gossip::Message<Payload>) -> anyhow::Result<()> {
+    async fn handle_message(&self, message: gossip::Message<Payload>) -> anyhow::Result<()> {
         match message.get_payload() {
             Payload::Generate => {
                 let msg_id: usize = message
