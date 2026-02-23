@@ -48,8 +48,8 @@ where
                 .lock()
                 .expect("Unable to get lock over pending map")
                 .insert(msg_id, tx);
-            let p = &self.pending;
-            eprintln!("still pending {p:?}");
+            // let p = &self.pending;
+            // eprintln!("still pending {p:?}");
         }
         self.send(msg);
         let response = rx.recv_timeout(timeout).map_err(|e| match e {
@@ -75,6 +75,7 @@ where
     }
 }
 
+#[derive(Debug)]
 pub enum RpcError {
     Timeout,
 }

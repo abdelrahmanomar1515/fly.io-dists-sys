@@ -65,6 +65,7 @@ where
 
         thread::spawn(|| {
             for msg in stdout_rx {
+                eprintln!("Sending message: {msg:?}");
                 let mut stdout = stdout().lock();
                 let msg_json = serde_json::to_string(&msg).expect("Serialize out message");
                 if let Err(error) = writeln!(stdout, "{msg_json}") {
@@ -79,9 +80,10 @@ where
                 serde_json::Deserializer::from_reader(stdin).into_iter::<Message<TPayload>>();
             for msg in msgs {
                 let msg = msg.expect("Malformed message");
+                eprintln!("Got message: {msg:?}");
                 if let Some(msg_id) = msg.body.in_reply_to {
                     if let Some(reply_channel) = network.get_reply_channel(&msg_id) {
-                        eprintln!("reply channel {msg_id}");
+                        // eprintln!("reply channel {msg_id}");
                         if let Err(e) = reply_channel.send(msg) {
                             eprintln!("Unable to send to rpc handler: {e}");
                         }
