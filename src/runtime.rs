@@ -81,16 +81,18 @@ where
             for msg in msgs {
                 let msg = msg.expect("Malformed message");
                 eprintln!("Got message: {msg:?}");
-                if let Some(msg_id) = msg.body.in_reply_to {
-                    if let Some(reply_channel) = network.get_reply_channel(&msg_id) {
-                        // eprintln!("reply channel {msg_id}");
-                        if let Err(e) = reply_channel.send(msg) {
-                            eprintln!("Unable to send to rpc handler: {e}");
-                        }
+                if let Some(reply_channel) = msg
+                    .body
+                    .in_reply_to
+                    .and_then(|msg_id| network.get_reply_channel(&msg_id))
+                {
+                    // eprintln!("reply channel {msg_id}");
+                    if let Err(e) = reply_channel.send(msg) {
+                        eprintln!("Unable to send to rpc handler: {e}");
                     }
                 } else {
                     stdin_tx.send(msg).expect("Unable to send out message");
-                }
+                };
             }
         });
 
