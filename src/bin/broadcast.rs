@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use core::panic;
 use gossip::{Message, Network, Node, Runtime};
 use rand::Rng;
@@ -5,12 +6,12 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
-    thread,
     time::Duration,
 };
 
-fn main() -> anyhow::Result<()> {
-    Runtime::<Payload, BoradcastNode>::run()
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    Runtime::<Payload, BoradcastNode>::run().await
 }
 
 struct BoradcastNode {
@@ -19,6 +20,7 @@ struct BoradcastNode {
     network: Network<Payload>,
 }
 
+#[async_trait]
 impl Node<Payload> for BoradcastNode {
     fn from_init(id: String, neighbors: Vec<String>, network: Network<Payload>) -> Self {
         let messages: Arc<Mutex<HashSet<usize>>> = Default::default();
@@ -39,7 +41,7 @@ impl Node<Payload> for BoradcastNode {
         }
     }
 
-    fn handle_message(&mut self, msg: Message<Payload>) -> anyhow::Result<()> {
+    async fn handle_message(&self, msg: Message<Payload>) -> anyhow::Result<()> {
         match msg.get_payload() {
             Payload::Broadcast { .. } => self.handle_broadcast(msg)?,
             Payload::Read => self.handle_read(msg)?,
@@ -62,38 +64,40 @@ impl BoradcastNode {
         known_messages: Arc<Mutex<HashMap<String, HashSet<usize>>>>,
         network: Network<Payload>,
     ) {
-        thread::spawn(move || loop {
-            let rng = rand::rng().random_range(0..100);
-            thread::sleep(Duration::from_millis(1000 + rng));
-            for dest_id in all_nodes.iter().filter(|node| node_id != **node) {
-                let empty_set = HashSet::new();
+        tokio::spawn(async move {
+            loop {
+                let rng = rand::rng().random_range(0..100);
+                tokio::time::sleep(Duration::from_millis(1000 + rng)).await;
+                for dest_id in all_nodes.iter().filter(|node| node_id != **node) {
+                    let empty_set = HashSet::new();
 
-                let messages_known_to_node =
-                    known_messages.lock().expect("Can't lock known messages");
-                let messages_known_to_node =
-                    messages_known_to_node.get(dest_id).unwrap_or(&empty_set);
-                let messages: HashSet<usize> = messages
-                    .lock()
-                    .expect("Can't lock messages")
-                    .difference(messages_known_to_node)
-                    .copied()
-                    .collect();
+                    let messages_known_to_node =
+                        known_messages.lock().expect("Can't lock known messages");
+                    let messages_known_to_node =
+                        messages_known_to_node.get(dest_id).unwrap_or(&empty_set);
+                    let messages: HashSet<usize> = messages
+                        .lock()
+                        .expect("Can't lock messages")
+                        .difference(messages_known_to_node)
+                        .copied()
+                        .collect();
 
-                if messages.is_empty() {
-                    continue;
+                    if messages.is_empty() {
+                        continue;
+                    }
+
+                    let msg = Message::new(
+                        node_id.clone(),
+                        dest_id.clone(),
+                        Payload::Gossip { messages },
+                    );
+                    network.send(msg);
                 }
-
-                let msg = Message::new(
-                    node_id.clone(),
-                    dest_id.clone(),
-                    Payload::Gossip { messages },
-                );
-                network.send(msg);
             }
         });
     }
 
-    fn handle_broadcast(&mut self, msg: Message<Payload>) -> anyhow::Result<()> {
+    fn handle_broadcast(&self, msg: Message<Payload>) -> anyhow::Result<()> {
         let Payload::Broadcast { message } = msg.body.payload else {
             panic!("expected broadcast");
         };
@@ -107,7 +111,7 @@ impl BoradcastNode {
         Ok(())
     }
 
-    fn handle_read(&mut self, msg: Message<Payload>) -> anyhow::Result<()> {
+    fn handle_read(&self, msg: Message<Payload>) -> anyhow::Result<()> {
         let Payload::Read = msg.body.payload else {
             panic!("expected read");
         };
@@ -119,7 +123,7 @@ impl BoradcastNode {
         Ok(())
     }
 
-    fn handle_gossip(&mut self, msg: Message<Payload>) -> anyhow::Result<()> {
+    fn handle_gossip(&self, msg: Message<Payload>) -> anyhow::Result<()> {
         let Payload::Gossip {
             messages: incoming_messages,
         } = &msg.body.payload
@@ -139,7 +143,7 @@ impl BoradcastNode {
         Ok(())
     }
 
-    fn handle_topology(&mut self, msg: Message<Payload>) -> anyhow::Result<()> {
+    fn handle_topology(&self, msg: Message<Payload>) -> anyhow::Result<()> {
         let Payload::Topology { .. } = &msg.body.payload else {
             panic!("expected topology");
         };
@@ -149,7 +153,7 @@ impl BoradcastNode {
         Ok(())
     }
 
-    fn handle_gossip_ok(&mut self, msg: Message<Payload>) -> anyhow::Result<()> {
+    fn handle_gossip_ok(&self, msg: Message<Payload>) -> anyhow::Result<()> {
         let Payload::GossipOk { messages } = msg.body.payload else {
             panic!("expected gossip_ok");
         };
