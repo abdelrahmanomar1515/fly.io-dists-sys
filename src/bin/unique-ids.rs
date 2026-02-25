@@ -7,6 +7,7 @@ async fn main() -> anyhow::Result<()> {
     Runtime::<Payload, UniqueIdsNode>::run().await
 }
 
+#[derive(Clone)]
 struct UniqueIdsNode {
     node_id: String,
     network: Network<Payload>,

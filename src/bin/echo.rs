@@ -7,6 +7,7 @@ async fn main() -> anyhow::Result<()> {
     Runtime::<Payload, EchoNode>::run().await
 }
 
+#[derive(Clone)]
 struct EchoNode {
     network: Network<Payload>,
 }

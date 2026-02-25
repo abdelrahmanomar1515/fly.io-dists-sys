@@ -6,7 +6,6 @@ use crate::{
 };
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use std::{
     fmt::Debug,
     marker::PhantomData,
@@ -22,7 +21,7 @@ where
 impl<TPayload, TNode> Runtime<TPayload, TNode>
 where
     TPayload: Payload,
-    TNode: Node<TPayload> + 'static,
+    TNode: Node<TPayload> + 'static + Clone,
 {
     pub async fn run() -> anyhow::Result<()> {
         let stdin = tokio::io::stdin();
@@ -105,11 +104,8 @@ where
             }
         });
 
-        let node = Arc::new(node);
         for msg in stdin_rx.into_iter() {
             let node = node.clone();
-            // eprintln!("strong count: {}", Arc::strong_count(&node));
-            // eprintln!("weak count: {}", Arc::strong_count(&node));
             eprintln!("Handling message: {msg:?}");
             tokio::spawn(async move {
                 let _ = node

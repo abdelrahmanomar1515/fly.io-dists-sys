@@ -1,35 +1,39 @@
 use anyhow::bail;
+use async_trait::async_trait;
 use gossip::{Message, Network, Node, Runtime};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
     thread,
     time::Duration,
 };
 
-fn main() -> anyhow::Result<()> {
-    Runtime::<Payload, GCounterNode>::run()
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    Runtime::<Payload, GCounterNode>::run().await
 }
 
+#[derive(Clone)]
 struct GCounterNode {
     node_id: String,
     msg_id_to_node: Arc<Mutex<HashMap<usize, String>>>,
-    known_values: HashMap<String, usize>,
+    known_values: Arc<Mutex<HashMap<String, usize>>>,
     network: Network<Payload>,
-    cache: usize,
-    msg_id: usize,
+    msg_id: Arc<AtomicUsize>,
 }
 
 impl GCounterNode {
     fn get_id(&mut self) -> usize {
-        self.msg_id += 1;
-        self.msg_id
+        self.msg_id.fetch_add(1, Ordering::SeqCst)
     }
 
-    fn store_compare_and_swap(&mut self, key: &str, from: usize, to: usize) {
-        let msg_id = self.get_id();
+    fn store_compare_and_swap(&self, key: &str, from: usize, to: usize) {
+        let msg_id = self.clone().get_id();
         let msg = Message::new(
             self.node_id.clone(),
             "seq-kv".into(),
@@ -71,29 +75,39 @@ impl GCounterNode {
         });
     }
 
-    fn handle_add(&mut self, msg: &Message<Payload>, delta: usize) -> anyhow::Result<()> {
+    fn handle_add(&self, msg: &Message<Payload>, delta: usize) -> anyhow::Result<()> {
         if delta == 0 {
             return Ok(());
         }
-        let from = self.cache;
-        let to = self.cache + delta;
-        self.cache += delta;
+        // let from = self.cache;
+        // let to = self.cache + delta;
+        // self.cache += delta;
+
+        let mut known_values = self.known_values.lock().expect("Getting lock");
+        let from = *known_values
+            .get(&self.node_id)
+            .expect("Should be initialized properly");
+        known_values
+            .entry(self.node_id.clone())
+            .and_modify(|value| *value += delta);
+
+        let to = from + delta;
 
         self.store_compare_and_swap(&self.node_id.clone(), from, to);
         self.network.send(msg.reply(Payload::AddOk));
         Ok(())
     }
 
-    fn handle_read(&mut self, msg: &Message<Payload>) -> anyhow::Result<()> {
+    fn handle_read(&self, msg: &Message<Payload>) -> anyhow::Result<()> {
         eprintln!("{:?}", self.known_values);
-        let total: usize = self.known_values.values().sum();
+        let total: usize = self.known_values.lock().expect("Lock").values().sum();
         self.network
             .send(msg.reply(Payload::ReadOk { value: total }));
         eprintln!("Returned read result as {total}");
         Ok(())
     }
 
-    fn handle_read_ok(&mut self, message: &Message<Payload>) -> anyhow::Result<()> {
+    fn handle_read_ok(&self, message: &Message<Payload>) -> anyhow::Result<()> {
         eprintln!("Current map: {:?}", self.msg_id_to_node);
         let Some(reply_msg_id) = message.body.in_reply_to else {
             eprintln!("in_reply_to should exist");
@@ -111,11 +125,15 @@ impl GCounterNode {
         eprintln!("Got read_ok for msg_id {reply_msg_id} for node {node_id} with value {value}");
 
         eprintln!("Setting value {:?}", self.known_values);
-        self.known_values.insert(node_id.clone(), value);
+        self.known_values
+            .lock()
+            .expect("Lock")
+            .insert(node_id.clone(), value);
         Ok(())
     }
 }
 
+#[async_trait]
 impl Node<Payload> for GCounterNode {
     fn from_init(id: String, neighbors: Vec<String>, network: Network<Payload>) -> Self {
         let msg_id_to_node: Arc<Mutex<HashMap<usize, String>>> = Default::default();
@@ -128,14 +146,15 @@ impl Node<Payload> for GCounterNode {
         Self {
             network,
             node_id: id,
-            known_values: neighbors.into_iter().map(|node| (node, 0)).collect(),
+            known_values: Arc::new(Mutex::new(
+                neighbors.into_iter().map(|node| (node, 0)).collect(),
+            )),
             msg_id_to_node,
-            cache: 0,
-            msg_id: 0,
+            msg_id: Arc::new(AtomicUsize::new(0)),
         }
     }
 
-    fn handle_message(&mut self, message: Message<Payload>) -> anyhow::Result<()> {
+    async fn handle_message(&self, message: Message<Payload>) -> anyhow::Result<()> {
         match message.get_payload() {
             Payload::Add { delta } => self
                 .handle_add(&message, *delta)

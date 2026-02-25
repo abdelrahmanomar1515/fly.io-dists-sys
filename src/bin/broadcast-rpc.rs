@@ -14,6 +14,7 @@ async fn main() -> anyhow::Result<()> {
     Runtime::<Payload, BoradcastNode>::run().await
 }
 
+#[derive(Clone)]
 struct BoradcastNode {
     messages: Arc<Mutex<HashSet<usize>>>,
     network: Network<Payload>,
