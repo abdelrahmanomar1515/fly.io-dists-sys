@@ -29,9 +29,11 @@ impl Node<Payload> for UniqueIdsNode {
                     .msg_id
                     .expect("msg_id should be available in generate message");
                 let node_id = &self.node_id;
-                self.network.send(message.reply(Payload::GenerateOk {
-                    id: format!("{node_id}-{msg_id}"),
-                }))
+                self.network
+                    .send(message.reply(Payload::GenerateOk {
+                        id: format!("{node_id}-{msg_id}"),
+                    }))
+                    .await
             }
             Payload::GenerateOk { .. } => {}
         }

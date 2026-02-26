@@ -44,11 +44,11 @@ impl Node<Payload> for BoradcastNode {
 
     async fn handle_message(&self, msg: Message<Payload>) -> anyhow::Result<()> {
         match msg.get_payload() {
-            Payload::Broadcast { .. } => self.handle_broadcast(msg)?,
-            Payload::Read => self.handle_read(msg)?,
-            Payload::Gossip { .. } => self.handle_gossip(msg)?,
+            Payload::Broadcast { .. } => self.handle_broadcast(msg).await?,
+            Payload::Read => self.handle_read(msg).await?,
+            Payload::Gossip { .. } => self.handle_gossip(msg).await?,
             Payload::GossipOk { .. } => self.handle_gossip_ok(msg)?,
-            Payload::Topology { .. } => self.handle_topology(msg)?,
+            Payload::Topology { .. } => self.handle_topology(msg).await?,
             Payload::ReadOk { .. } | Payload::BroadcastOk | Payload::TopologyOk => {
                 panic!("got invalid message")
             }
@@ -72,17 +72,19 @@ impl BoradcastNode {
                 for dest_id in all_nodes.iter().filter(|node| node_id != **node) {
                     let empty_set = HashSet::new();
 
-                    let messages_known_to_node =
-                        known_messages.lock().expect("Can't lock known messages");
-                    let messages_known_to_node =
-                        messages_known_to_node.get(dest_id).unwrap_or(&empty_set);
-                    let messages: HashSet<usize> = messages
-                        .lock()
-                        .expect("Can't lock messages")
-                        .difference(messages_known_to_node)
-                        .copied()
-                        .collect();
-
+                    let messages = {
+                        let messages_known_to_node =
+                            known_messages.lock().expect("Can't lock known messages");
+                        let messages_known_to_node =
+                            messages_known_to_node.get(dest_id).unwrap_or(&empty_set);
+                        let messages: HashSet<usize> = messages
+                            .lock()
+                            .expect("Can't lock messages")
+                            .difference(messages_known_to_node)
+                            .copied()
+                            .collect();
+                        messages
+                    };
                     if messages.is_empty() {
                         continue;
                     }
@@ -90,15 +92,17 @@ impl BoradcastNode {
                     let msg = Message::new(
                         node_id.clone(),
                         dest_id.clone(),
-                        Payload::Gossip { messages },
+                        Payload::Gossip {
+                            messages: messages.clone(),
+                        },
                     );
-                    network.send(msg);
+                    network.send(msg).await;
                 }
             }
         });
     }
 
-    fn handle_broadcast(&self, msg: Message<Payload>) -> anyhow::Result<()> {
+    async fn handle_broadcast(&self, msg: Message<Payload>) -> anyhow::Result<()> {
         let Payload::Broadcast { message } = msg.body.payload else {
             panic!("expected broadcast");
         };
@@ -108,11 +112,11 @@ impl BoradcastNode {
             messages.insert(message);
         }
         let reply = msg.reply(Payload::BroadcastOk);
-        self.network.send(reply);
+        self.network.send(reply).await;
         Ok(())
     }
 
-    fn handle_read(&self, msg: Message<Payload>) -> anyhow::Result<()> {
+    async fn handle_read(&self, msg: Message<Payload>) -> anyhow::Result<()> {
         let Payload::Read = msg.body.payload else {
             panic!("expected read");
         };
@@ -120,11 +124,11 @@ impl BoradcastNode {
         let reply = msg.reply(Payload::ReadOk {
             messages: self.messages.lock().expect("Unable to get lock").clone(),
         });
-        self.network.send(reply);
+        self.network.send(reply).await;
         Ok(())
     }
 
-    fn handle_gossip(&self, msg: Message<Payload>) -> anyhow::Result<()> {
+    async fn handle_gossip(&self, msg: Message<Payload>) -> anyhow::Result<()> {
         let Payload::Gossip {
             messages: incoming_messages,
         } = &msg.body.payload
@@ -140,17 +144,17 @@ impl BoradcastNode {
         let reply = msg.reply(Payload::GossipOk {
             messages: incoming_messages.clone(),
         });
-        self.network.send(reply);
+        self.network.send(reply).await;
         Ok(())
     }
 
-    fn handle_topology(&self, msg: Message<Payload>) -> anyhow::Result<()> {
+    async fn handle_topology(&self, msg: Message<Payload>) -> anyhow::Result<()> {
         let Payload::Topology { .. } = &msg.body.payload else {
             panic!("expected topology");
         };
 
         let reply = msg.reply(Payload::TopologyOk);
-        self.network.send(reply);
+        self.network.send(reply).await;
         Ok(())
     }
 

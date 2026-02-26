@@ -6,12 +6,9 @@ use crate::{
 };
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
-use std::{
-    fmt::Debug,
-    marker::PhantomData,
-    sync::mpsc::{self},
-};
+use std::{fmt::Debug, marker::PhantomData};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::sync::mpsc::channel;
 
 pub struct Runtime<TPayload, TNode>(PhantomData<TPayload>, PhantomData<TNode>)
 where
@@ -45,8 +42,8 @@ where
             panic!("first message not init")
         };
 
-        let (stdin_tx, stdin_rx) = mpsc::channel();
-        let (stdout_tx, stdout_rx) = mpsc::channel();
+        let (stdin_tx, mut stdin_rx) = channel(1);
+        let (stdout_tx, mut stdout_rx) = channel(1);
 
         let network = Network::new(stdout_tx);
         let node = TNode::from_init(node_id.clone(), node_ids.clone(), network.clone());
@@ -55,22 +52,19 @@ where
         {
             let mut stdout = tokio::io::stdout();
             let reply = serde_json::to_string(&reply).context("Serialize init_ok")?;
-            eprintln!("Trying to send reply: {reply}");
             stdout
                 .write_all(reply.as_bytes())
                 .await
                 .expect("Writing to stdout");
             stdout.write_all(b"\n").await.expect("Writing to stdout");
-            eprintln!("wrote reply");
             stdout
                 .flush()
                 .await
                 .expect("Unable to send init_ok msg to stdout: {error}");
-            eprintln!("flushed write");
         }
 
-        tokio::spawn(async {
-            for msg in stdout_rx {
+        tokio::spawn(async move {
+            while let Some(msg) = stdout_rx.recv().await {
                 eprintln!("Sending message: {msg:?}");
                 let mut stdout = tokio::io::stdout();
                 let msg_json = serde_json::to_string(&msg).expect("Serialize out message");
@@ -96,15 +90,18 @@ where
                 {
                     // eprintln!("reply channel {msg_id}");
                     if let Err(e) = reply_channel.send(msg) {
-                        eprintln!("Unable to send to rpc handler: {e}");
+                        eprintln!("Unable to send to rpc handler: {e:?}");
                     }
                 } else {
-                    stdin_tx.send(msg).expect("Unable to send out message");
+                    stdin_tx
+                        .send(msg)
+                        .await
+                        .expect("Unable to send out message");
                 };
             }
         });
 
-        for msg in stdin_rx.into_iter() {
+        while let Some(msg) = stdin_rx.recv().await {
             let node = node.clone();
             eprintln!("Handling message: {msg:?}");
             tokio::spawn(async move {

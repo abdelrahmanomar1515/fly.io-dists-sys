@@ -1,4 +1,3 @@
-use anyhow::bail;
 use async_trait::async_trait;
 use gossip::{Message, Network, Node, Runtime};
 use rand::Rng;
@@ -9,7 +8,6 @@ use std::{
         atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
     },
-    thread,
     time::Duration,
 };
 
@@ -21,10 +19,10 @@ async fn main() -> anyhow::Result<()> {
 #[derive(Clone)]
 struct GCounterNode {
     node_id: String,
-    msg_id_to_node: Arc<Mutex<HashMap<usize, String>>>,
     known_values: Arc<Mutex<HashMap<String, usize>>>,
     network: Network<Payload>,
     msg_id: Arc<AtomicUsize>,
+    current_value: Arc<AtomicUsize>,
 }
 
 impl GCounterNode {
@@ -32,7 +30,7 @@ impl GCounterNode {
         self.msg_id.fetch_add(1, Ordering::SeqCst)
     }
 
-    fn store_compare_and_swap(&self, key: &str, from: usize, to: usize) {
+    async fn store_compare_and_swap(&self, key: &str, from: usize, to: usize) {
         let msg_id = self.clone().get_id();
         let msg = Message::new(
             self.node_id.clone(),
@@ -45,90 +43,70 @@ impl GCounterNode {
             },
         )
         .with_id(msg_id);
-        self.network.send(msg)
+        let _ = self.network.rpc(msg).await;
     }
 
-    fn read_others(
-        node_id: String,
-        all_nodes: Vec<String>,
-        network: Network<Payload>,
-        msg_id_to_node_id: Arc<Mutex<HashMap<usize, String>>>,
-    ) {
-        thread::spawn(move || loop {
-            let rng = rand::rng().random_range(0..100);
-            thread::sleep(Duration::from_millis(1000 + rng));
-            for node in &all_nodes {
-                let msg_id = rand::rng().random_range(1..99999999999);
-                let msg = Message::new(
-                    node_id.clone(),
-                    "seq-kv".into(),
-                    Payload::SeqKvRead { key: node.clone() },
-                )
-                .with_id(msg_id);
-                msg_id_to_node_id
-                    .lock()
-                    .expect("Can't get lock")
-                    .insert(msg_id, node.clone());
-                eprintln!("Added entry {msg_id}: {node}");
-                network.send(msg);
+    fn read_others(self, all_nodes: Vec<String>) {
+        tokio::spawn(async move {
+            loop {
+                let rng = rand::rng().random_range(0..100);
+                tokio::time::sleep(Duration::from_millis(1000 + rng)).await;
+                for node in &all_nodes {
+                    let mut s = self.clone();
+                    let node = node.clone();
+                    tokio::spawn(async move {
+                        let msg_id = s.get_id();
+                        let msg = Message::new(
+                            s.node_id.clone(),
+                            "seq-kv".into(),
+                            Payload::SeqKvRead { key: node.clone() },
+                        )
+                        .with_id(msg_id);
+                        let Ok(message) = s.network.rpc(msg).await else {
+                            eprintln!("Couldn't send msg");
+                            return;
+                        };
+                        let Payload::ReadOk { value } = message.body.payload else {
+                            eprintln!("Message type must be read_ok and have a value");
+                            return;
+                        };
+
+                        s.known_values
+                            .lock()
+                            .expect("Lock")
+                            .insert(node.clone(), value);
+                    });
+                }
             }
         });
     }
 
-    fn handle_add(&self, msg: &Message<Payload>, delta: usize) -> anyhow::Result<()> {
+    async fn handle_add(&self, msg: &Message<Payload>, delta: usize) -> anyhow::Result<()> {
         if delta == 0 {
+            self.network.send(msg.reply(Payload::AddOk)).await;
             return Ok(());
         }
-        // let from = self.cache;
-        // let to = self.cache + delta;
-        // self.cache += delta;
 
-        let mut known_values = self.known_values.lock().expect("Getting lock");
-        let from = *known_values
-            .get(&self.node_id)
-            .expect("Should be initialized properly");
-        known_values
-            .entry(self.node_id.clone())
-            .and_modify(|value| *value += delta);
-
+        let from = self.current_value.load(Ordering::SeqCst);
         let to = from + delta;
+        self.current_value
+            .compare_exchange(from, to, Ordering::SeqCst, Ordering::SeqCst)
+            .map_err(|e| {
+                eprintln!("Error saving new value for node");
+                anyhow::anyhow!("Error saving new value for node: {e}")
+            })?;
 
-        self.store_compare_and_swap(&self.node_id.clone(), from, to);
-        self.network.send(msg.reply(Payload::AddOk));
+        self.store_compare_and_swap(&self.node_id.clone(), from, to)
+            .await;
+        self.network.send(msg.reply(Payload::AddOk)).await;
         Ok(())
     }
 
-    fn handle_read(&self, msg: &Message<Payload>) -> anyhow::Result<()> {
-        eprintln!("{:?}", self.known_values);
+    async fn handle_read(&self, msg: &Message<Payload>) -> anyhow::Result<()> {
         let total: usize = self.known_values.lock().expect("Lock").values().sum();
         self.network
-            .send(msg.reply(Payload::ReadOk { value: total }));
-        eprintln!("Returned read result as {total}");
-        Ok(())
-    }
-
-    fn handle_read_ok(&self, message: &Message<Payload>) -> anyhow::Result<()> {
-        eprintln!("Current map: {:?}", self.msg_id_to_node);
-        let Some(reply_msg_id) = message.body.in_reply_to else {
-            eprintln!("in_reply_to should exist");
-            bail!("in_reply_to should exist");
-        };
-
-        let mut lock = self.msg_id_to_node.lock().expect("Can't get lock again");
-        let Some(node_id) = lock.remove(&reply_msg_id) else {
-            bail!("Got reply of a message that we don't know which node it corresponds to");
-        };
-        let Payload::ReadOk { value } = message.body.payload else {
-            eprintln!("Message type must be read_ok and have a value");
-            bail!("Message type must be read_ok and have a value");
-        };
-        eprintln!("Got read_ok for msg_id {reply_msg_id} for node {node_id} with value {value}");
-
-        eprintln!("Setting value {:?}", self.known_values);
-        self.known_values
-            .lock()
-            .expect("Lock")
-            .insert(node_id.clone(), value);
+            .send(msg.reply(Payload::ReadOk { value: total }))
+            .await;
         Ok(())
     }
 }
@@ -136,31 +114,32 @@ impl GCounterNode {
 #[async_trait]
 impl Node<Payload> for GCounterNode {
     fn from_init(id: String, neighbors: Vec<String>, network: Network<Payload>) -> Self {
-        let msg_id_to_node: Arc<Mutex<HashMap<usize, String>>> = Default::default();
-        GCounterNode::read_others(
-            id.clone(),
-            neighbors.clone(),
-            network.clone(),
-            msg_id_to_node.clone(),
-        );
-        Self {
-            network,
-            node_id: id,
+        let node = Self {
+            network: network.clone(),
+            node_id: id.clone(),
             known_values: Arc::new(Mutex::new(
-                neighbors.into_iter().map(|node| (node, 0)).collect(),
+                neighbors
+                    .clone()
+                    .into_iter()
+                    .map(|node| (node, 0))
+                    .collect(),
             )),
-            msg_id_to_node,
             msg_id: Arc::new(AtomicUsize::new(0)),
-        }
+            current_value: Arc::new(AtomicUsize::new(0)),
+        };
+        node.clone().read_others(neighbors);
+        node
     }
 
     async fn handle_message(&self, message: Message<Payload>) -> anyhow::Result<()> {
         match message.get_payload() {
             Payload::Add { delta } => self
                 .handle_add(&message, *delta)
+                .await
                 .inspect_err(|e| eprintln!("Got error on add: {e}")),
             Payload::Read => self
                 .handle_read(&message)
+                .await
                 .inspect_err(|e| eprintln!("Got error on read: {e}")),
             Payload::Error {
                 code,
@@ -172,14 +151,14 @@ impl Node<Payload> for GCounterNode {
                 );
                 Ok(())
             }
-            Payload::ReadOk { .. } => self.handle_read_ok(&message),
-            Payload::AddOk
+            Payload::ReadOk { .. }
+            | Payload::AddOk
             | Payload::SeqKvRead { .. }
             | Payload::SeqKvWrite { .. }
             | Payload::SeqKvWriteOk
             | Payload::SeqKvCas { .. }
             | Payload::SeqKvCasOk => {
-                eprintln!("Unhandeld message type: {message:?}");
+                eprintln!("Unhandled message type: {message:?}");
                 Ok(())
             }
         }

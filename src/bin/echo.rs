@@ -22,6 +22,7 @@ impl Node<Payload> for EchoNode {
         if let Payload::Echo { echo } = message.get_payload() {
             self.network
                 .send(message.reply(Payload::EchoOk { echo: echo.clone() }))
+                .await
         }
 
         Ok(())
