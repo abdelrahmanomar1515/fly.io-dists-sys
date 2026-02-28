@@ -2,7 +2,6 @@ use crate::{Message, Payload};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
-    time::Duration,
 };
 use tokio::sync::{
     mpsc::Sender as MpscSender,
