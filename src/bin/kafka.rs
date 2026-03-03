@@ -1,93 +1,111 @@
-use async_trait::async_trait;
-use gossip::{Message, Network, Node, Runtime};
+use gossip::{retry, KeyValueStore, Message, Network, Node, RpcError, Runtime, Storage};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use std::{collections::HashMap, time::Duration};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    Runtime::<Payload, EchoNode>::run().await
+    Runtime::<Payload, KafkaNode>::run().await
 }
 
 #[derive(Clone)]
-struct EchoNode {
-    network: Network<Payload>,
+struct KafkaNode {
+    network: Network,
     logs: Logs,
     offsets: Offsets,
 }
 
 #[derive(Clone, Debug)]
 struct Logs {
-    data: Arc<Mutex<HashMap<String, Vec<usize>>>>,
+    storage: KeyValueStore<Vec<usize>>,
 }
 
 impl Logs {
-    fn new() -> Self {
+    fn new(network: Network, node_id: String) -> Self {
         Self {
-            data: Default::default(),
+            storage: KeyValueStore::new("lin-kv".to_owned(), network, node_id),
         }
     }
-    fn append(&self, key: String, value: usize) -> usize {
-        let mut lock = self.data.lock().unwrap();
-        let mut len = 0;
-        lock.entry(key.clone())
-            .and_modify(|v| {
-                len = v.len();
-                v.push(value)
-            })
-            .or_insert(vec![value]);
-        len
+    async fn append(&self, key: String, value: usize) -> anyhow::Result<usize> {
+        let log_key = self.to_log_key(key.clone());
+        let current_log = self.get(&key).await?;
+        let offset = current_log.len();
+        let mut new_log = current_log.clone();
+        new_log.push(value);
+        self.storage.cas(log_key, current_log, new_log).await?;
+        Ok(offset)
     }
-
-    fn get_from_offset(&self, key: &String, offset: usize) -> Vec<usize> {
-        let lock = self.data.lock().unwrap();
-        (*lock
-            .get(key)
-            .unwrap_or(&vec![])
-            .iter()
-            .skip(offset)
-            .copied()
-            .collect::<Vec<usize>>())
-        .to_vec()
+    async fn get_from_offset(&self, key: &str, offset: usize) -> anyhow::Result<Vec<usize>> {
+        let current_log = self.get(key).await?;
+        Ok(current_log.iter().skip(offset).copied().collect())
+    }
+    async fn get(&self, key: &str) -> anyhow::Result<Vec<usize>> {
+        Ok(self
+            .storage
+            .get(self.to_log_key(key.to_owned()))
+            .await
+            .or_else(|e| match e {
+                RpcError::KeyDoesNotExist => Ok(vec![]),
+                e => Err(e),
+            })?)
+    }
+    fn to_log_key(&self, key: String) -> String {
+        "log-".to_owned() + &key
     }
 }
 
 #[derive(Clone, Debug)]
 struct Offsets {
-    data: Arc<Mutex<HashMap<String, usize>>>,
+    storage: KeyValueStore<usize>,
 }
 impl Offsets {
-    fn new() -> Self {
+    fn new(network: Network, node_id: String) -> Self {
         Self {
-            data: Default::default(),
+            storage: KeyValueStore::new("lin-kv".to_owned(), network, node_id),
         }
     }
 
-    fn commit(&self, offsets: &HashMap<String, usize>) {
-        let mut lock = self.data.lock().unwrap();
-        for (key, offset) in offsets.iter() {
-            lock.insert(key.clone(), *offset);
-        }
+    async fn commit(&self, key: String, offset: usize) -> anyhow::Result<()> {
+        let current = self.get(&key).await?;
+        self.storage.cas(key, current, offset).await?;
+        Ok(())
     }
 
-    fn list(&self, keys: &[String]) -> HashMap<String, usize> {
-        let lock = self.data.lock().unwrap();
-        keys.iter()
-            .filter_map(|key| lock.get(key).map(|v| (key.clone(), *v)))
-            .collect()
+    async fn list(&self, keys: &[String]) -> anyhow::Result<HashMap<String, usize>> {
+        let mut map = HashMap::new();
+        for key in keys {
+            let value = self.get(key).await?;
+            if value != 0 {
+                map.insert(key.clone(), value);
+            }
+        }
+        Ok(map)
+    }
+    async fn get(&self, key: &str) -> anyhow::Result<usize> {
+        Ok(self
+            .storage
+            .get(key.to_owned())
+            .await
+            .or_else(|e| match e {
+                RpcError::KeyDoesNotExist => Ok(0),
+                e => Err(e),
+            })?)
     }
 }
 
-impl EchoNode {
+impl KafkaNode {
     async fn handle_send(&self, message: Message<Payload>) -> anyhow::Result<()> {
         let Payload::Send { msg, key } = message.get_payload() else {
             panic!("Incorrect message type");
         };
-        let offset = self.logs.append(key.clone(), *msg);
+        let offset = retry(
+            async || self.logs.append(key.clone(), *msg).await,
+            10,
+            Duration::from_millis(1),
+        )
+        .await
+        .expect("Couldn't commit after 10 retries");
         self.network
-            .send(message.reply(Payload::SendOk { offset }))
+            .send(&message.reply(Payload::SendOk { offset }))
             .await;
         Ok(())
     }
@@ -96,23 +114,20 @@ impl EchoNode {
             panic!("Incorrect message type");
         };
 
-        let msgs = offsets
-            .iter()
-            .map(|(key, offset)| {
-                (
-                    key.clone(),
-                    self.logs
-                        .get_from_offset(key, *offset)
-                        .iter()
-                        .enumerate()
-                        .map(|(i, msg)| (offset + i, *msg))
-                        .collect(),
-                )
-            })
-            .collect();
-        eprintln!("{:?}", self.logs);
+        let mut msgs: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
+        for (key, offset) in offsets {
+            let logs = self.logs.get_from_offset(key, *offset).await?;
+
+            msgs.insert(
+                key.clone(),
+                logs.iter()
+                    .enumerate()
+                    .map(|(i, msg)| (offset + i, *msg))
+                    .collect(),
+            );
+        }
         self.network
-            .send(message.reply(Payload::PollOk { msgs }))
+            .send(&message.reply(Payload::PollOk { msgs }))
             .await;
         Ok(())
     }
@@ -120,9 +135,17 @@ impl EchoNode {
         let Payload::CommitOffsets { offsets } = message.get_payload() else {
             panic!("Incorrect message type");
         };
-        self.offsets.commit(offsets);
+
+        for (key, offset) in offsets {
+            retry(
+                async || self.offsets.commit(key.clone(), *offset).await,
+                10,
+                Duration::from_millis(1),
+            )
+            .await?;
+        }
         self.network
-            .send(message.reply(Payload::CommitOffsetsOk))
+            .send(&message.reply(Payload::CommitOffsetsOk))
             .await;
         Ok(())
     }
@@ -130,21 +153,20 @@ impl EchoNode {
         let Payload::ListCommittedOffsets { keys } = message.get_payload() else {
             panic!("Incorrect message type");
         };
-        let offsets = self.offsets.list(keys);
+        let offsets = self.offsets.list(keys).await?;
         self.network
-            .send(message.reply(Payload::ListCommittedOffsetsOk { offsets }))
+            .send(&message.reply(Payload::ListCommittedOffsetsOk { offsets }))
             .await;
         Ok(())
     }
 }
 
-#[async_trait]
-impl Node<Payload> for EchoNode {
-    fn from_init(_id: String, _neighbors: Vec<String>, network: Network<Payload>) -> Self {
+impl Node<Payload> for KafkaNode {
+    fn from_init(id: String, _neighbors: Vec<String>, network: Network) -> Self {
         Self {
-            network,
-            logs: Logs::new(),
-            offsets: Offsets::new(),
+            network: network.clone(),
+            logs: Logs::new(network.clone(), id.clone()),
+            offsets: Offsets::new(network, id),
         }
     }
 

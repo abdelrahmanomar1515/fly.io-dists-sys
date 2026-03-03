@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use core::panic;
 use gossip::{Message, Network, Node, Runtime};
 use rand::Rng;
@@ -18,12 +17,11 @@ async fn main() -> anyhow::Result<()> {
 struct BoradcastNode {
     messages: Arc<Mutex<HashSet<usize>>>,
     known_messages: Arc<Mutex<HashMap<String, HashSet<usize>>>>,
-    network: Network<Payload>,
+    network: Network,
 }
 
-#[async_trait]
 impl Node<Payload> for BoradcastNode {
-    fn from_init(id: String, neighbors: Vec<String>, network: Network<Payload>) -> Self {
+    fn from_init(id: String, neighbors: Vec<String>, network: Network) -> Self {
         let messages: Arc<Mutex<HashSet<usize>>> = Default::default();
         let known_messages: Arc<Mutex<HashMap<String, HashSet<usize>>>> = Default::default();
 
@@ -63,7 +61,7 @@ impl BoradcastNode {
         all_nodes: Vec<String>,
         messages: Arc<Mutex<HashSet<usize>>>,
         known_messages: Arc<Mutex<HashMap<String, HashSet<usize>>>>,
-        network: Network<Payload>,
+        network: Network,
     ) {
         tokio::spawn(async move {
             loop {
@@ -96,7 +94,7 @@ impl BoradcastNode {
                             messages: messages.clone(),
                         },
                     );
-                    network.send(msg).await;
+                    network.send(&msg).await;
                 }
             }
         });
@@ -112,7 +110,7 @@ impl BoradcastNode {
             messages.insert(message);
         }
         let reply = msg.reply(Payload::BroadcastOk);
-        self.network.send(reply).await;
+        self.network.send(&reply).await;
         Ok(())
     }
 
@@ -124,7 +122,7 @@ impl BoradcastNode {
         let reply = msg.reply(Payload::ReadOk {
             messages: self.messages.lock().expect("Unable to get lock").clone(),
         });
-        self.network.send(reply).await;
+        self.network.send(&reply).await;
         Ok(())
     }
 
@@ -144,7 +142,7 @@ impl BoradcastNode {
         let reply = msg.reply(Payload::GossipOk {
             messages: incoming_messages.clone(),
         });
-        self.network.send(reply).await;
+        self.network.send(&reply).await;
         Ok(())
     }
 
@@ -154,7 +152,7 @@ impl BoradcastNode {
         };
 
         let reply = msg.reply(Payload::TopologyOk);
-        self.network.send(reply).await;
+        self.network.send(&reply).await;
         Ok(())
     }
 

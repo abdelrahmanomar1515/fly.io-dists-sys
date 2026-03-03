@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use gossip::{Message, Network, Node, Runtime};
 use serde::{Deserialize, Serialize};
 
@@ -9,19 +8,18 @@ async fn main() -> anyhow::Result<()> {
 
 #[derive(Clone)]
 struct EchoNode {
-    network: Network<Payload>,
+    network: Network,
 }
 
-#[async_trait]
 impl Node<Payload> for EchoNode {
-    fn from_init(_id: String, _neighbors: Vec<String>, network: Network<Payload>) -> Self {
+    fn from_init(_id: String, _neighbors: Vec<String>, network: Network) -> Self {
         Self { network }
     }
 
     async fn handle_message(&self, message: Message<Payload>) -> anyhow::Result<()> {
         if let Payload::Echo { echo } = message.get_payload() {
             self.network
-                .send(message.reply(Payload::EchoOk { echo: echo.clone() }))
+                .send(&message.reply(Payload::EchoOk { echo: echo.clone() }))
                 .await
         }
 

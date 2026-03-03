@@ -1,6 +1,5 @@
-use async_trait::async_trait;
 use core::panic;
-use gossip::{Message, Network, Node, RpcError, Runtime};
+use gossip::{Message, Network, Node, Runtime};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -17,12 +16,11 @@ async fn main() -> anyhow::Result<()> {
 #[derive(Clone)]
 struct BoradcastNode {
     messages: Arc<Mutex<HashSet<usize>>>,
-    network: Network<Payload>,
+    network: Network,
 }
 
-#[async_trait]
 impl Node<Payload> for BoradcastNode {
-    fn from_init(id: String, neighbors: Vec<String>, network: Network<Payload>) -> Self {
+    fn from_init(id: String, neighbors: Vec<String>, network: Network) -> Self {
         let messages: Arc<Mutex<HashSet<usize>>> = Default::default();
         let known_messages: Arc<Mutex<HashMap<String, HashSet<usize>>>> = Default::default();
 
@@ -60,7 +58,7 @@ impl BoradcastNode {
         all_nodes: Vec<String>,
         messages: Arc<Mutex<HashSet<usize>>>,
         known_messages: Arc<Mutex<HashMap<String, HashSet<usize>>>>,
-        network: Network<Payload>,
+        network: Network,
     ) {
         tokio::spawn(async move {
             loop {
@@ -93,19 +91,15 @@ impl BoradcastNode {
                         continue;
                     }
 
-                    let msg = Message::new(
+                    let mut msg = Message::new(
                         node_id.clone(),
                         dest_id.clone(),
                         Payload::Gossip { messages },
-                    )
-                    .with_id(rand::rng().random::<u32>() as usize);
+                    );
                     let n = network.clone();
                     let b = known_messages.clone();
                     tokio::spawn(async move {
-                        match n.rpc(msg.clone()).await {
-                            Err(RpcError::Timeout) => {
-                                // continue
-                            }
+                        match n.rpc(&mut msg).await {
                             Ok(reply) => {
                                 eprintln!("Got reply for message {reply:?}");
 
@@ -118,6 +112,9 @@ impl BoradcastNode {
                                     .entry(dest_id.clone())
                                     .and_modify(|v| v.extend(messages.clone()))
                                     .or_insert(messages.clone());
+                            }
+                            Err(_) => {
+                                // continue
                             }
                         }
                     });
@@ -136,7 +133,7 @@ impl BoradcastNode {
             messages.insert(message);
         }
         let reply = msg.reply(Payload::BroadcastOk);
-        self.network.send(reply).await;
+        self.network.send(&reply).await;
         Ok(())
     }
 
@@ -148,7 +145,7 @@ impl BoradcastNode {
         let reply = msg.reply(Payload::ReadOk {
             messages: self.messages.lock().expect("Unable to get lock").clone(),
         });
-        self.network.send(reply).await;
+        self.network.send(&reply).await;
         Ok(())
     }
 
@@ -168,7 +165,7 @@ impl BoradcastNode {
         let reply = msg.reply(Payload::GossipOk {
             messages: incoming_messages.clone(),
         });
-        self.network.send(reply).await;
+        self.network.send(&reply).await;
         Ok(())
     }
 
@@ -178,7 +175,7 @@ impl BoradcastNode {
         };
 
         let reply = msg.reply(Payload::TopologyOk);
-        self.network.send(reply).await;
+        self.network.send(&reply).await;
         Ok(())
     }
 }

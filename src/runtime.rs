@@ -6,6 +6,7 @@ use crate::{
 };
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::{fmt::Debug, marker::PhantomData};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc::channel;
@@ -65,10 +66,9 @@ where
 
         tokio::spawn(async move {
             while let Some(msg) = stdout_rx.recv().await {
-                eprintln!("Sending message: {msg:?}");
+                eprintln!("Out: {msg}");
                 let mut stdout = tokio::io::stdout();
-                let msg_json = serde_json::to_string(&msg).expect("Serialize out message");
-                stdout.write_all(msg_json.as_bytes()).await?;
+                stdout.write_all(msg.as_bytes()).await?;
                 stdout.write_all(b"\n").await?;
                 stdout.flush().await?;
             }
@@ -81,15 +81,15 @@ where
 
             while let Some(line) = lines.next_line().await.expect("Malformed new line message") {
                 let msg = serde_json::from_str(&line);
-                let msg: Message<TPayload> = msg.expect("Malformed message");
-                eprintln!("Got message: {msg:?}");
+                let msg: Message<Value> = msg.expect("Malformed message");
+                eprintln!("In : {line}");
                 if let Some(reply_channel) = msg
                     .body
                     .in_reply_to
                     .and_then(|msg_id| network.get_reply_channel(&msg_id))
                 {
                     // eprintln!("reply channel {msg_id}");
-                    if let Err(e) = reply_channel.send(msg) {
+                    if let Err(e) = reply_channel.send(line) {
                         eprintln!("Unable to send to rpc handler: {e:?}");
                     }
                 } else {
@@ -102,8 +102,8 @@ where
         });
 
         while let Some(msg) = stdin_rx.recv().await {
+            let msg = msg.into_typed()?;
             let node = node.clone();
-            eprintln!("Handling message: {msg:?}");
             tokio::spawn(async move {
                 let _ = node
                     .handle_message(msg)

@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use gossip::{Network, Node, Runtime};
 use serde::{Deserialize, Serialize};
 
@@ -10,11 +9,10 @@ async fn main() -> anyhow::Result<()> {
 #[derive(Clone)]
 struct UniqueIdsNode {
     node_id: String,
-    network: Network<Payload>,
+    network: Network,
 }
-#[async_trait]
 impl Node<Payload> for UniqueIdsNode {
-    fn from_init(id: String, _neighbors: Vec<String>, network: Network<Payload>) -> Self {
+    fn from_init(id: String, _neighbors: Vec<String>, network: Network) -> Self {
         Self {
             node_id: id,
             network,
@@ -30,7 +28,7 @@ impl Node<Payload> for UniqueIdsNode {
                     .expect("msg_id should be available in generate message");
                 let node_id = &self.node_id;
                 self.network
-                    .send(message.reply(Payload::GenerateOk {
+                    .send(&message.reply(Payload::GenerateOk {
                         id: format!("{node_id}-{msg_id}"),
                     }))
                     .await

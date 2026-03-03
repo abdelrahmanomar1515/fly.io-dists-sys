@@ -1,4 +1,5 @@
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde_json::Value;
 use std::fmt::Debug;
 
 pub trait Payload: Clone + Debug + Serialize + DeserializeOwned + Send + 'static {}
@@ -24,7 +25,7 @@ impl<T> Message<T> {
         }
     }
 
-    pub fn with_id(mut self, msg_id: usize) -> Message<T> {
+    pub(crate) fn with_id(&mut self, msg_id: usize) -> &Message<T> {
         self.body.msg_id = Some(msg_id);
         self
     }
@@ -50,9 +51,26 @@ impl<T> Message<T> {
     }
 }
 
+impl Message<Value> {
+    pub fn into_typed<T: DeserializeOwned>(self) -> Result<Message<T>, serde_json::Error> {
+        let msg = Message {
+            src: self.src,
+            dest: self.dest,
+            body: Body {
+                msg_id: self.body.msg_id,
+                in_reply_to: self.body.in_reply_to,
+                payload: serde_json::from_value(self.body.payload)?,
+            },
+        };
+
+        Ok(msg)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Body<Payload> {
     pub msg_id: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub in_reply_to: Option<usize>,
     #[serde(flatten)]
     pub payload: Payload,
