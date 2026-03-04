@@ -94,7 +94,7 @@ impl Node<Payload> for GCounterNode {
                     .collect(),
             )),
             current_value: Arc::new(AtomicUsize::new(0)),
-            storage: KeyValueStore::new("seq-kv".to_owned(), network.clone(), id),
+            storage: KeyValueStore::new("seq-kv", network.clone(), id),
         };
         node.clone().read_others(neighbors);
         node

@@ -3,7 +3,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{fmt::Debug, future::Future, marker::PhantomData};
 
 pub trait Storable: Serialize + Debug + Clone + Send + Sync + DeserializeOwned + 'static {}
-impl<P: Serialize + Debug + Clone + Send + Sync + DeserializeOwned + 'static> Storable for P {}
+impl<AnyT: Serialize + Debug + Clone + Send + Sync + DeserializeOwned + 'static> Storable for AnyT {}
 pub trait Storage<TValue: Storable> {
     fn get_type(&self) -> &str;
     fn get_src(&self) -> &str;
@@ -122,13 +122,13 @@ enum StoragePaylod<TValue: Serialize + Send> {
 
 #[derive(Clone, Debug)]
 pub struct KeyValueStore<T> {
-    store_type: String,
+    store_type: &'static str,
     node_id: String,
     network: Network,
     _phantom: PhantomData<T>,
 }
 impl<T> KeyValueStore<T> {
-    pub fn new(store_type: String, network: Network, node_id: String) -> Self {
+    pub fn new(store_type: &'static str, network: Network, node_id: String) -> Self {
         Self {
             store_type,
             network,
@@ -139,7 +139,7 @@ impl<T> KeyValueStore<T> {
 }
 impl<T: Storable> Storage<T> for KeyValueStore<T> {
     fn get_type(&self) -> &str {
-        &self.store_type
+        self.store_type
     }
 
     fn get_src(&self) -> &str {
